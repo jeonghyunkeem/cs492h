@@ -1,0 +1,4 @@
+{
+	"scannet" : "../../../Dataset/ScanNet/scans/", 
+	"shapenet" : "../../../Dataset/ShapeNet/ShapeNetCore.v2/"
+}

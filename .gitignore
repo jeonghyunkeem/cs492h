@@ -1,0 +1,8 @@
+*.npy
+*.ply
+*.obj
+*.pth
+log2/
+dump/
+outputs/
+
