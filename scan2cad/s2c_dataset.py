@@ -21,14 +21,6 @@ NOT_CARED_ID = np.array([0])
 
 SYM2CLASS = {"__SYM_NONE": 0, "__SYM_ROTATE_UP_2": 1, "__SYM_ROTATE_UP_4": 2, "__SYM_ROTATE_UP_INF": 3}
 
-def quaternion_multiply(quaternion1, quaternion0):
-    w0, x0, y0, z0 = quaternion0
-    w1, x1, y1, z1 = quaternion1
-    return np.array([-x1 * x0 - y1 * y0 - z1 * z0 + w1 * w0,
-                     x1 * w0 + y1 * z0 - z1 * y0 + w1 * x0,
-                     -x1 * z0 + y1 * w0 + z1 * x0 + w1 * y0,
-                     x1 * y0 - y1 * x0 + z1 * w0 + w1 * z0], dtype=np.float64)
-
 def roty(t):
     """Rotation about the y-axis."""
     c = np.cos(t)
@@ -97,10 +89,7 @@ class Scan2CADDataset(Dataset):
             i = -1
             for idx, r in enumerate(data):
                 i_scan = r["id_scan"]
-                
-                if i_scan not in self.scan_names:
-                    continue
-                
+                if i_scan not in self.scan_names: continue
                 i += 1
                 d[i] = {}
                 d[i]['id_scan'] = i_scan
@@ -147,10 +136,10 @@ class Scan2CADDataset(Dataset):
         semantic_labels = semantic_labels[choices]
 
         # Target CAD Objects (K, cls, 9 DoF)
-        target_obj_classes = np.zeros((MAX_NUM_OBJ), dtype=np.int64)
-        target_obj_symmetry = np.zeros((MAX_NUM_OBJ), dtype=np.int64)
-        target_obj_alignments = np.zeros((MAX_NUM_OBJ, 10), dtype=np.float32)    # trs, rot, scl
-        target_obj_6d_rotation = np.zeros((MAX_NUM_OBJ, 6), dtype=np.float32)
+        target_obj_classes      = np.zeros((MAX_NUM_OBJ), dtype=np.int64)
+        target_obj_symmetry     = np.zeros((MAX_NUM_OBJ), dtype=np.int64)
+        target_obj_alignments   = np.zeros((MAX_NUM_OBJ, 10), dtype=np.float32)    # trs, rot, scl
+        target_obj_6d_rotation  = np.zeros((MAX_NUM_OBJ, 6), dtype=np.float32)
         for model in range(K):
             # Class (1)
             cls_str = data['models'][model]['sem_cls']
@@ -177,18 +166,16 @@ class Scan2CADDataset(Dataset):
             # Rotation along up-axis/Y-axis
             rot_angle = (np.random.random()*np.pi/3) - np.pi/6 # -30 ~ +30 degree
             rot_mat = roty(rot_angle)
-            rot_mat_T = np.transpose(rot_mat)
 
             # Rotate point cloud
-            point_cloud[:,0:3] = np.dot(point_cloud[:,0:3], rot_mat_T)
+            point_cloud[:,0:3] = np.dot(point_cloud[:,0:3], np.transpose(rot_mat))
 
             # Rotate Center
-            target_center[:,0:3] = np.dot(target_center[:,0:3], rot_mat_T)
+            target_center[:,0:3] = np.dot(target_center[:,0:3], np.transpose(rot_mat))
 
             # Rotate Rotation
             target_R = np.zeros((K, 3, 3))
             rot_mat_q = roty(-rot_angle)
-            rot_mat_q_T = np.transpose(rot_mat_q)
 
             for model in range(K):
                 # --- Rotation-Quaternion ---
@@ -199,12 +186,12 @@ class Scan2CADDataset(Dataset):
                 target_R[model, 0:3, 0:3] = quaternion.as_rotation_matrix(target_q0)
                 
                 # Update Rotation
-                target_R[model, :, :] = np.dot(target_R[model, :, :], rot_mat_q_T)
+                target_R[model, :, :] = np.dot(target_R[model, :, :], np.transpose(rot_mat_q))
                 gt_q = quaternion.from_rotation_matrix(target_R[model, :, :])
                 gt_q_array = quaternion.as_float_array(gt_q)
                 target_rotation[model, :] = gt_q_array
 
-                # Rotation-6D Representation
+                # --- Rotation-6D Representation ---
                 target_obj_6d_rotation[model, :] = from_q_to_6d(target_rotation[model, :])
 
         # ------ VOTES ------
@@ -224,12 +211,9 @@ class Scan2CADDataset(Dataset):
             else:
                 x = point_cloud[ind,:3]
                 center = 0.5*(x.min(0) + x.max(0))
-                # Find closest center of CAD
+                # Find closest center of CAD pool
                 dist, cad_i = nn_search(center, target_center[:K, 0:3])
-                # i_cls = target_cls[cad_i]
-                # if i_cls != (sem_cls-1): 
-                #     continue
-                # Dictionary for update center to cad center
+                # Update center to CAD center
                 # New cad model
                 if cad_i not in ddict:
                     ddict[cad_i] = dist
@@ -243,18 +227,26 @@ class Scan2CADDataset(Dataset):
         # Target Bounding Boxes
         target_bboxes_size = np.zeros((MAX_NUM_OBJ, 3))
         target_bboxes_mask = np.zeros((MAX_NUM_OBJ))   
-    
-        # assert len(point_to_cad) == K
+
         for cad_id in point_to_cad:
             # Points within CAD instance
             cad_ind = point_to_cad[cad_id]
-            cad_x = point_cloud[cad_ind, 0:3]
+            cad_x = point_cloud[cad_ind, :3]
             cad_center = target_center[cad_id, 0:3]
+            
             # Bounding box label
             target_bboxes_mask[cad_id] = 1.0
-            bbox_length = abs(cad_x.max(0) - cad_center)*2
+            
+            # Lift point center to CAD center 
+            bbox_length1 = abs(cad_x.max(0) - cad_center)
+            bbox_length2 = abs(cad_x.min(0) - cad_center)
+            if np.sum(bbox_length1) > np.sum(bbox_length2):
+                bbox_length = bbox_length1*2
+            else:
+                bbox_length = bbox_length2*2
             target_bboxes_size[cad_id, :] = bbox_length
-            # Update center to cad center
+            
+            # Update votes to cad center
             point_votes[cad_ind, :] = cad_center - cad_x
             point_votes_mask[cad_ind] = 1.0
 
@@ -263,22 +255,24 @@ class Scan2CADDataset(Dataset):
         # ----- LABEL -----
         label = {}
         label['point_clouds'] = point_cloud.astype(np.float32)
-        label['sem_cls_label'] = target_cls.astype(np.int64)
-        label['cad_sym_label'] = target_sym.astype(np.int64)
+        
+        label['center_label'] = target_center.astype(np.float32)
         label['box_mask_label'] = target_bboxes_mask.astype(np.float32)
         label['box_size_label'] = target_bboxes_size.astype(np.float32) 
-        label['center_label'] = target_center.astype(np.float32)
+        
         label['rotation_label'] = target_rotation.astype(np.float32)
         label['rot_6d_label'] = target_obj_6d_rotation.astype(np.float32)
         label['scale_label'] = target_scale.astype(np.float32)
+
         label['vote_label'] = point_votes.astype(np.float32)
         label['vote_label_mask'] = point_votes_mask.astype(np.int64)
+
+        label['sem_cls_label'] = target_cls.astype(np.int64)
+        label['cad_sym_label'] = target_sym.astype(np.int64)
         label['n_total'] = np.array(K).astype(np.int64)
 
         return label
 
-def test_augmenatation(angle):
-    return 0
 
 if __name__ == "__main__":
     Dataset = Scan2CADDataset()

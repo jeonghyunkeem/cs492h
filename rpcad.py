@@ -58,17 +58,17 @@ parser.add_argument('--checkpoint_path', default=None, help='Model checkpoint pa
 parser.add_argument('--log_dir', default='log2', help='Dump dir to save model checkpoint [default: log]')
 parser.add_argument('--dump_dir', default=None, help='Dump dir to save sample outputs [default: None]')
 parser.add_argument('--num_point', type=int, default=20000, help='Point Number [default: 20000]')
-parser.add_argument('--num_target', type=int, default=256, help='Proposal number [default: 256]')
+parser.add_argument('--num_target', type=int, default=64, help='Proposal number [default: 256]')
 parser.add_argument('--vote_factor', type=int, default=1, help='Vote factor [default: 1]')
 parser.add_argument('--cluster_sampling', default='vote_fps', help='Sampling strategy for vote clusters: vote_fps, seed_fps, random [default: vote_fps]')
 parser.add_argument('--ap_iou_thresh', type=float, default=0.25, help='AP IoU threshold [default: 0.25]')
-parser.add_argument('--max_epoch', type=int, default=250, help='Epoch to run [default: 500]')
+parser.add_argument('--max_epoch', type=int, default=500, help='Epoch to run [default: 500]')
 parser.add_argument('--batch_size', type=int, default=8, help='Batch Size during training [default: 8]')
-parser.add_argument('--learning_rate', type=float, default=0.002, help='Initial learning rate [default: 0.01]')
+parser.add_argument('--learning_rate', type=float, default=0.002, help='Initial learning rate [default: 0.002]')
 parser.add_argument('--weight_decay', type=float, default=0, help='Optimization L2 weight decay [default: 0]')
-parser.add_argument('--bn_decay_step', type=int, default=20, help='Period of BN decay (in epochs) [default: 20]')
+parser.add_argument('--bn_decay_step', type=int, default=50, help='Period of BN decay (in epochs) [default: 20]')
 parser.add_argument('--bn_decay_rate', type=float, default=0.5, help='Decay rate for BN decay [default: 0.5]')
-parser.add_argument('--lr_decay_steps', default='120, 160, 200', help='When to decay the learning rate (in epochs) [default: 200,300,400]')
+parser.add_argument('--lr_decay_steps', default='200, 300, 400', help='When to decay the learning rate (in epochs) [default: 200,300,400]')
 parser.add_argument('--lr_decay_rates', default='0.1,0.1,0.1', help='Decay rates for lr decay [default: 0.1,0.1]')
 parser.add_argument('--no_height', action='store_true', help='Do NOT use height signal in input.')
 parser.add_argument('--use_color', action='store_true', help='Use RGB color in input.')
@@ -89,7 +89,7 @@ assert(len(LR_DECAY_STEPS)==len(LR_DECAY_RATES))
 LOG_DIR = FLAGS.log_dir
 DEFAULT_DUMP_DIR = os.path.join(BASE_DIR, os.path.basename(LOG_DIR))
 DUMP_DIR = FLAGS.dump_dir if FLAGS.dump_dir is not None else DEFAULT_DUMP_DIR
-DEFAULT_CHECKPOINT_PATH = os.path.join(LOG_DIR, 'checkpoint.tar')
+DEFAULT_CHECKPOINT_PATH = os.path.join(LOG_DIR, 'checkpoint_rpcad.tar')
 CHECKPOINT_PATH = FLAGS.checkpoint_path if FLAGS.checkpoint_path is not None \
     else DEFAULT_CHECKPOINT_PATH
 FLAGS.DUMP_DIR = DUMP_DIR
@@ -122,16 +122,17 @@ def my_worker_init_fn(worker_id):
     np.random.seed(np.random.get_state()[1][0] + worker_id)
 
 # Create Dataset and Dataloader
-TRAIN_DATASET = Scan2CADDataset('train', num_points=NUM_POINT, augment=False)
+TRAIN_DATASET = Scan2CADDataset('train', num_points=NUM_POINT, augment=True)
 TEST_DATASET = Scan2CADDataset('val', num_points=NUM_POINT, augment=False)
 TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size = BATCH_SIZE, shuffle=True, num_workers=4, worker_init_fn=my_worker_init_fn)
 TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size = BATCH_SIZE, shuffle=True, num_workers=4, worker_init_fn=my_worker_init_fn)
-DATASET_CONFIG = Scan2CADDatasetConfig() # ScannetDatasetConfig()
+DATASET_CONFIG = Scan2CADDatasetConfig() 
 
 # Init the model and optimzier
-MODEL = importlib.import_module('votenet_rpcad')
-num_input_channel = int(FLAGS.use_color)*3 + int(not FLAGS.no_height)*1
+MODEL = importlib.import_module('RPCADnet')
+# num_input_channel = int(FLAGS.use_color)*3 + int(not FLAGS.no_height)*1
 num_input_channel = 0
+
 # Detector
 Detector = MODEL.RPCADNet
 net = Detector(num_class=DATASET_CONFIG.num_class,
@@ -140,8 +141,7 @@ net = Detector(num_class=DATASET_CONFIG.num_class,
                num_proposal=FLAGS.num_target,
                vote_factor=FLAGS.vote_factor,
                sampling=FLAGS.cluster_sampling,
-               device=device)
-
+               )
 if torch.cuda.device_count() > 1:
     log_string("Let's use %d GPUs!" % (torch.cuda.device_count()))
     # dim = 0 [30, xxx] -> [10, ...], [10, ...], [10, ...] on 3 GPUs
@@ -177,7 +177,7 @@ def adjust_learning_rate(optimizer, epoch):
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
-# Used for AP calculation
+# Used for evaluation 
 CONFIG_DICT = {'remove_empty_box':False, 
                 'use_3d_nms':True,
                 'nms_iou':0.25, 
@@ -193,7 +193,7 @@ TEST_VISUALIZER = TfVisualizer(FLAGS, 'test')
 
 # ------------------------------------------------------------------------- GLOBAL CONFIG END
 
-def train_one_epoch(epoch, writer=None):
+def train_one_epoch():
     stat_dict = {} # collect statistics
     adjust_learning_rate(optimizer, EPOCH_CNT)
     bnm_scheduler.step() # decay BN momentum
@@ -208,14 +208,13 @@ def train_one_epoch(epoch, writer=None):
         # Forward pass
         optimizer.zero_grad()
         inputs = {'point_clouds': batch_data_label['point_clouds']}
-        end_points = net(inputs, pred_cad=False)
+        end_points = net(inputs)
         
         # Compute loss and gradients, update parameters.
         for key in batch_data_label:
             assert(key not in end_points)
             end_points[key] = batch_data_label[key]
         loss, end_points = criterion(end_points, DATASET_CONFIG)
-
         loss.backward()
         optimizer.step()
             
@@ -228,7 +227,8 @@ def train_one_epoch(epoch, writer=None):
         batch_interval = 10
         if (batch_idx+1) % batch_interval == 0:
             log_string(' ---- batch: %03d ----' % (batch_idx+1))
-            TRAIN_VISUALIZER.log_scalars({key:stat_dict[key]/batch_interval for key in stat_dict}, (EPOCH_CNT*len(TRAIN_DATALOADER)+batch_idx)*BATCH_SIZE)
+            TRAIN_VISUALIZER.log_scalars({key:stat_dict[key]/batch_interval for key in stat_dict}, 
+                (EPOCH_CNT*len(TRAIN_DATALOADER)+batch_idx)*BATCH_SIZE)
             for key in sorted(stat_dict.keys()):
                 log_string('mean %s: %f'%(key, stat_dict[key]/batch_interval))
                 stat_dict[key] = 0
@@ -255,17 +255,11 @@ def train_one_epoch(epoch, writer=None):
         print("------------------------------------------")
         log_string('train class mean accuracy: %f'%(class_mean_accuracy))
         print("------------------------------------------\n")
-
-        # # Write results
-        # if writer is not None:
-        #     assert(epoch is not None)
-        #     step = epoch * len(TRAIN_DATALOADER)
-        #     writer.add_scalar('Acc/Train', class_mean_accuracy, step)
     
     return total_loss / n, class_mean_accuracy
     
 
-def evaluate_one_epoch(epoch, writer=None):
+def evaluate_one_epoch():
     stat_dict = {} # collect statistics
     evaluation = Evaluation()
     net.eval() # set model to eval mode (for bn and dp)
@@ -280,7 +274,7 @@ def evaluate_one_epoch(epoch, writer=None):
         # Forward pass
         inputs = {'point_clouds': batch_data_label['point_clouds']}
         with torch.no_grad():
-            end_points = net(inputs, pred_cad=False)
+            end_points = net(inputs)
 
         # Compute loss
         for key in batch_data_label:
@@ -305,24 +299,14 @@ def evaluate_one_epoch(epoch, writer=None):
         log_string('eval mean %s: %f'%(key, stat_dict[key]/(float(batch_idx+1))))
 
     # Write results
-    TEST_VISUALIZER.log_scalars({key:stat_dict[key]/float(batch_idx+1) for key in stat_dict}, (EPOCH_CNT+1)*len(TRAIN_DATALOADER)*BATCH_SIZE)
-    # if writer is not None:
-    #     assert(epoch is not None)
-    #     step = epoch * len(TEST_DATALOADER)
-    #     # writer.add_scalar('Loss/Test', mean_loss, step)
-    #     for key in stat_dict:
-    #         writer.add_scalar('val/loss/' + str(key), stat_dict[key]/(float(batch_idx+1)), step)
+    TEST_VISUALIZER.log_scalars({key:stat_dict[key]/float(batch_idx+1) for key in stat_dict}, 
+        (EPOCH_CNT+1)*len(TRAIN_DATALOADER)*BATCH_SIZE)
 
     mean_loss = stat_dict['loss']/float(batch_idx+1)
 
     class_mean_accuracy = 0 
     if EPOCH_CNT == 0 or EPOCH_CNT % 10 == 9: # Eval every 10 epochs
         class_mean_accuracy, t, r, s, eval_dict = evaluation.summary()
-        
-        # if writer is not None:
-        #     assert(epoch is not None)
-        #     step = epoch * len(TEST_DATALOADER)
-        #     writer.add_scalar('Acc/Test', class_mean_accuracy, step)
 
         print("\n--------- EVALUATION PER CLASS -----------")
         for key in sorted(eval_dict.keys()):
@@ -354,10 +338,8 @@ def train(start_epoch):
 
         # Reset numpy seed.
         np.random.seed()
-        train_loss, train_acc = train_one_epoch(epoch=epoch, writer=writer)
-        
-        # if EPOCH_CNT == 0 or EPOCH_CNT % 10 == 9: # Eval every 10 epochs
-        val_loss, val_acc = evaluate_one_epoch(epoch=epoch, writer=writer)
+        train_loss, train_acc = train_one_epoch()
+        val_loss, val_acc = evaluate_one_epoch()
 
         # Write Loss per epoch
         if writer is not None:

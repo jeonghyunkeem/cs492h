@@ -3,7 +3,6 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from numpy.core.fromnumeric import shape
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -31,8 +30,6 @@ DC = Scan2CADDatasetConfig()
 def decode_scores(net, net2, end_points):
     # ----- Box Scores -----
     net_transposed = net.transpose(2,1) # (batch_size, 1024, ..)
-    batch_size = net_transposed.shape[0]
-    num_proposal = net_transposed.shape[1]
 
     objectness_scores = net_transposed[:,:,0:2]
     end_points['objectness_scores'] = objectness_scores
@@ -65,11 +62,8 @@ def decode_scores(net, net2, end_points):
 
 
 class ProposalModule(nn.Module):
-    def __init__(self, num_class, num_heading_bin, num_proposal, sampling, device, seed_feat_dim=256):
+    def __init__(self, num_class, num_heading_bin, num_proposal, sampling, seed_feat_dim=256):
         super().__init__() 
-
-        self.device = device
-
         self.num_class = num_class
         self.num_heading_bin = num_heading_bin
         self.num_proposal = num_proposal
@@ -88,14 +82,12 @@ class ProposalModule(nn.Module):
             )
 
         # Object proposal/detection
-        # Objectness scores (2), center residual (3),
-        # heading class+residual (num_heading_bin*2), size class+residual(num_size_cluster*4)
         self.conv1 = torch.nn.Conv1d(128,128,1)
         self.conv2 = torch.nn.Conv1d(128,128,1)
         self.conv3 = torch.nn.Conv1d(128,
                                     2 + # Objectness
                                     3 + # Center Regression
-                                    3 + # Box Size Regression
+                                    3 +  # Box Size Regression
                                     self.num_class, # Num of classes
                                     1)
         self.bn1 = torch.nn.BatchNorm1d(128)
@@ -121,18 +113,20 @@ class ProposalModule(nn.Module):
         # Transform Prediction - from Votes
         self.cad_conv1 = torch.nn.Conv1d(128,128,1)
         self.cad_conv2 = torch.nn.Conv1d(128,128,1)
-        self.cad_conv3 = torch.nn.Conv1d(128, 4 + 3 + 6, 1)   # Symmetry, Scale, Rotation (6D)
+        self.cad_conv3 = torch.nn.Conv1d(128, 
+                                        4 + # Symmetry
+                                        3 + # Scale 
+                                        6,  # Rotation (6D)
+                                        1)   
         self.cad_bn1 = torch.nn.BatchNorm1d(128)
         self.cad_bn2 = torch.nn.BatchNorm1d(128)
 
         # self-attention ========================================
         self.sa1_1 = SpatialCGNL(128, int(128 / 2), use_scale=False, groups=4)
         self.sa2_1 = SpatialCGNL(128, int(128 / 2), use_scale=False, groups=4)
-        self.gs_conv1_1 = torch.nn.Conv1d(512, 128, 1)
 
         self.sa1_2 = SpatialCGNL(128, int(128 / 2), use_scale=False, groups=4)
         self.sa2_2 = SpatialCGNL(128, int(128 / 2), use_scale=False, groups=4)
-        self.gs_conv1_2 = torch.nn.Conv1d(512, 128, 1)
         # =======================================================
 
     def BoxCropping(self, pcd, box_net):
@@ -155,9 +149,12 @@ class ProposalModule(nn.Module):
                 cad_inds[k] = np.where(inds == True)
 
                 if len(pc_in_box) < 5:
-                    k_feature = torch.zeros(64, 1).to(self.device)
+                    k_feature = torch.zeros(64, 1).cuda()
                 else:
+                    # Points in Box
                     box_points = pcd[b, cad_inds[k], :3].transpose(2,1)     # (1, 3, inds)
+
+                    # Alignment Feature
                     k_feature = self.box_conv1(box_points).squeeze(0)       # (64, inds) <- (1, 64, inds)
                     k_feature = torch.mean(k_feature, 1, keepdim=True)      # (64, 1)
             
@@ -225,7 +222,7 @@ class ProposalModule(nn.Module):
     #     return end_points
 
 
-    def forward(self, xyz, features, point_cloud, end_points, pred_cad=False):
+    def forward(self, xyz, features, point_cloud, end_points):
         """
         Args:
             xyz: (B,K,3)
@@ -259,31 +256,31 @@ class ProposalModule(nn.Module):
         # Self-attetion
         feature_dim = features.shape[1]
         batch_size = features.shape[0]
-        # features1 = features.contiguous().view(batch_size, feature_dim, 16, 16)
-        # features2 = features.contiguous().view(batch_size, feature_dim, 16, 16)
+        features1 = features.contiguous().view(batch_size, feature_dim, 8, 8)
         
         # --------- BOX PROPOSAL GENERATION ---------
         # votes relation
-        # net1 = self.sa1_1(features1)
-        # net1 = self.sa2_1(net1)
-        # net1 = net1.contiguous().view(batch_size, feature_dim, self.num_proposal)
+        net1 = self.sa1_1(features1)
+        net1 = self.sa2_1(net1)
+        net1 = net1.contiguous().view(batch_size, feature_dim, self.num_proposal)
         # Box proposal
-        net1 = F.relu(self.bn1(self.conv1(features))) 
+        net1 = F.relu(self.bn1(self.conv1(net1))) 
         net1 = F.relu(self.bn2(self.conv2(net1))) 
-        net1 = self.conv3(net1) # (batch_size, 2+3+3+num_class, num_proposal)
+        net1 = self.conv3(net1) # (batch_size, objness(2)+center(3)+size(3)+num_class, num_proposal)
         
         # --------- CAD ALGINMENT ESTIMATION ---------
         # Points Cropping by Box
-        # features1 = self.BoxCropping(point_cloud, net1)
-        
+        features2 = self.BoxCropping(point_cloud, net1)
+        features2 = features.contiguous().view(batch_size, feature_dim, 8, 8)
+
         # Alignment Relation
-        # net2 = self.sa1_2(features2)
-        # net2 = self.sa2_2(net2)
-        # net2 = net2.contiguous().view(batch_size, feature_dim, self.num_proposal)
+        net2 = self.sa1_2(features2)
+        net2 = self.sa2_2(net2)
+        net2 = net2.contiguous().view(batch_size, feature_dim, self.num_proposal)
         # Alignment Estimation
-        net2 = F.relu(self.cad_bn1(self.cad_conv1(features)))
+        net2 = F.relu(self.cad_bn1(self.cad_conv1(net2)))
         net2 = F.relu(self.cad_bn2(self.cad_conv2(net2)))
-        net2 = self.cad_conv3(net2) # (batch_size, 4+3+6, num_proposal)
+        net2 = self.cad_conv3(net2) # (batch_size, symmetry(4)+scale(3)+rotation(6), num_proposal)
         # 6D Representation
         rot_6d = net2.transpose(2,1)[:, :, 7:].contiguous() # (B, K, 6)
         e1 = F.normalize(rot_6d[:,:,:3], p=2, dim=-1)

@@ -127,6 +127,7 @@ def compute_box_and_sem_cls_loss(end_points, config):
     object_assignment = end_points['object_assignment']
     batch_size = object_assignment.shape[0]
 
+    # ----- BOUNDING BOX SIZE -----
     # Compute center loss
     pred_center = end_points['center']
     gt_center = end_points['center_label'][:,:,0:3]
@@ -138,45 +139,47 @@ def compute_box_and_sem_cls_loss(end_points, config):
     centroid_reg_loss2 = \
         torch.sum(dist2*box_label_mask)/(torch.sum(box_label_mask)+1e-6)
     center_loss = centroid_reg_loss1 + centroid_reg_loss2
-
-    # # Semantic cls loss
-    sem_cls_pred = end_points['sem_cls_scores'].transpose(2,1)
-    sem_cls_label = torch.gather(end_points['sem_cls_label'], 1, object_assignment) # select (B,K) from (B,K2)
-    criterion_sem_cls = nn.CrossEntropyLoss(reduction='none')
-    sem_cls_loss1 = criterion_sem_cls(sem_cls_pred, sem_cls_label) # (B,K)
-    sem_cls_loss2 = torch.sum(sem_cls_loss1 * objectness_label)/(torch.sum(objectness_label)+1e-6)
-        
-    # ----- BOUNDING BOX SIZE -----
+    
+    # Compute box size loss
     box_size_pred = end_points['box_size']
     box_size_label = torch.gather(end_points['box_size_label'], 1, object_assignment.unsqueeze(-1).repeat(1,1,3)) # select (B,K,3) from (B,K2,3)
     box_size_loss = torch.mean(huber_loss(box_size_pred - box_size_label, delta=1.0), -1)
     box_size_loss = torch.sum(box_size_loss*objectness_label)/(torch.sum(objectness_label)+1e-6)
     
     # ----- CAD TRANSFORMATION -----
-    # Compute rotation loss
+    # Compute Rotation loss
+    # (1) 6D Representation
     rotation_pred_6d = end_points['rot_6d_scores']
     rotation_label_6d = torch.gather(end_points['rot_6d_label'], 1, object_assignment.unsqueeze(-1).repeat(1,1,6))  # (B, K, 4)
     rotation_6d_loss = torch.mean(huber_loss(rotation_label_6d - rotation_pred_6d, delta=1.0), -1)
     rotation_6d_loss = torch.sum(rotation_6d_loss * objectness_label)/(torch.sum(objectness_label)+1e-6)
-
+    ## (2) Quaternion Regression
     # rotation_pred = end_points['rotation_scores']  
     # rotation_label = torch.gather(end_points['rotation_label'], 1, object_assignment.unsqueeze(-1).repeat(1,1,4))
     # rotation_loss = torch.mean(huber_loss(rotation_pred - rotation_label, delta=1.0), -1)#.transpose(2,1)
     # rotation_loss = torch.sum(rotation_loss * objectness_label)/(torch.sum(objectness_label)+1e-6)
 
-    # Compute size loss
+    # Compute Scale loss
     scale_pred = end_points['scale_scores']
     scale_label = torch.gather(end_points['scale_label'], 1, object_assignment.unsqueeze(-1).repeat(1,1,3))
     scale_loss = torch.mean(huber_loss(scale_pred - scale_label, delta=1.0), -1)
     scale_loss = torch.sum(scale_loss * objectness_label)/(torch.sum(objectness_label)+1e-6)
 
+    # Symmetry class loss
     sym_pred = end_points['sym_scores'].transpose(2,1)
     sym_label = torch.gather(end_points['cad_sym_label'], 1, object_assignment) # select (B,K) from (B,K2)
     criterion_sym_loss = nn.CrossEntropyLoss(reduction='none')
     sym_loss = criterion_sym_loss(sym_pred, sym_label)
     sym_loss = torch.sum(sym_loss * objectness_label)/(torch.sum(objectness_label)+1e-6)
+    
+    # Semantic class loss
+    sem_cls_pred = end_points['sem_cls_scores'].transpose(2,1)
+    sem_cls_label = torch.gather(end_points['sem_cls_label'], 1, object_assignment) # select (B,K) from (B,K2)
+    criterion_sem_cls = nn.CrossEntropyLoss(reduction='none')
+    sem_cls_loss = criterion_sem_cls(sem_cls_pred, sem_cls_label) # (B,K)
+    sem_cls_loss = torch.sum(sem_cls_loss * objectness_label)/(torch.sum(objectness_label)+1e-6)
 
-    return center_loss, box_size_loss, rotation_6d_loss, scale_loss, sym_loss, sem_cls_loss2
+    return center_loss, box_size_loss, rotation_6d_loss, scale_loss, sym_loss, sem_cls_loss
 
 
 def get_loss(end_points, config):
@@ -222,19 +225,20 @@ def get_loss(end_points, config):
 
     # Box loss and sem cls loss
     center_loss, box_size_loss, rotation_loss, scale_loss, sym_loss, sem_cls_loss = compute_box_and_sem_cls_loss(end_points, config)
-    end_points['sem_cls_loss'] = sem_cls_loss
+    
+    # Box Loss
     end_points['box_size_loss'] = box_size_loss
     end_points['center_loss'] = center_loss
-    # box_loss = box_size_loss #alpha * rotation_loss + alpha * scale_loss
+    end_points['box_loss'] = box_size_loss + center_loss
 
-    end_points['box_loss'] = 0.5*box_size_loss + center_loss
-    # end_points['sem_cls_loss'] = sem_cls_loss
-
+    # Alignment Loss
     end_points['rotation_loss'] = rotation_loss
     end_points['scale_loss'] = scale_loss
-    
     trnsf_loss = rotation_loss + scale_loss
     end_points['transformation_loss'] = trnsf_loss
+    
+    # Class loss
+    end_points['sem_cls_loss'] = sem_cls_loss
     end_points['sym_loss'] = sym_loss
 
     # Final loss function
