@@ -55,20 +55,20 @@ print(device)
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', default='votenet', help='Model file name [default: votenet]')
 parser.add_argument('--checkpoint_path', default=None, help='Model checkpoint path [default: None]')
-parser.add_argument('--log_dir', default='log2', help='Dump dir to save model checkpoint [default: log]')
+parser.add_argument('--log_dir', default='log_7', help='Dump dir to save model checkpoint [default: log]')
 parser.add_argument('--dump_dir', default=None, help='Dump dir to save sample outputs [default: None]')
 parser.add_argument('--num_point', type=int, default=20000, help='Point Number [default: 20000]')
-parser.add_argument('--num_target', type=int, default=64, help='Proposal number [default: 256]')
+parser.add_argument('--num_target', type=int, default=256, help='Proposal number [default: 256]')
 parser.add_argument('--vote_factor', type=int, default=1, help='Vote factor [default: 1]')
 parser.add_argument('--cluster_sampling', default='vote_fps', help='Sampling strategy for vote clusters: vote_fps, seed_fps, random [default: vote_fps]')
 parser.add_argument('--ap_iou_thresh', type=float, default=0.25, help='AP IoU threshold [default: 0.25]')
-parser.add_argument('--max_epoch', type=int, default=500, help='Epoch to run [default: 500]')
+parser.add_argument('--max_epoch', type=int, default=250, help='Epoch to run [default: 500]')
 parser.add_argument('--batch_size', type=int, default=8, help='Batch Size during training [default: 8]')
 parser.add_argument('--learning_rate', type=float, default=0.002, help='Initial learning rate [default: 0.002]')
 parser.add_argument('--weight_decay', type=float, default=0, help='Optimization L2 weight decay [default: 0]')
-parser.add_argument('--bn_decay_step', type=int, default=50, help='Period of BN decay (in epochs) [default: 20]')
+parser.add_argument('--bn_decay_step', type=int, default=20, help='Period of BN decay (in epochs) [default: 20]')
 parser.add_argument('--bn_decay_rate', type=float, default=0.5, help='Decay rate for BN decay [default: 0.5]')
-parser.add_argument('--lr_decay_steps', default='200, 300, 400', help='When to decay the learning rate (in epochs) [default: 200,300,400]')
+parser.add_argument('--lr_decay_steps', default='120, 160, 200', help='When to decay the learning rate (in epochs) [default: 200,300,400]')
 parser.add_argument('--lr_decay_rates', default='0.1,0.1,0.1', help='Decay rates for lr decay [default: 0.1,0.1]')
 parser.add_argument('--no_height', action='store_true', help='Do NOT use height signal in input.')
 parser.add_argument('--use_color', action='store_true', help='Use RGB color in input.')
@@ -122,10 +122,20 @@ def my_worker_init_fn(worker_id):
     np.random.seed(np.random.get_state()[1][0] + worker_id)
 
 # Create Dataset and Dataloader
-TRAIN_DATASET = Scan2CADDataset('train', num_points=NUM_POINT, augment=True)
-TEST_DATASET = Scan2CADDataset('val', num_points=NUM_POINT, augment=False)
-TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size = BATCH_SIZE, shuffle=True, num_workers=4, worker_init_fn=my_worker_init_fn)
-TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size = BATCH_SIZE, shuffle=True, num_workers=4, worker_init_fn=my_worker_init_fn)
+TRAIN_DATASET = Scan2CADDataset('train', 
+                                num_points=NUM_POINT, 
+                                augment=True)
+TEST_DATASET = Scan2CADDataset('val', 
+                                num_points=NUM_POINT, 
+                                augment=False)
+TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, 
+                                batch_size = BATCH_SIZE, 
+                                shuffle=True, 
+                                num_workers=4, worker_init_fn=my_worker_init_fn)
+TEST_DATALOADER = DataLoader(TEST_DATASET, 
+                                batch_size = BATCH_SIZE, 
+                                shuffle=True, 
+                                num_workers=4, worker_init_fn=my_worker_init_fn)
 DATASET_CONFIG = Scan2CADDatasetConfig() 
 
 # Init the model and optimzier
@@ -234,7 +244,7 @@ def train_one_epoch():
                 stat_dict[key] = 0
 
         if EPOCH_CNT == 0 or EPOCH_CNT % 10 == 9: # Eval every 10 epochs
-            evaluation.step(end_points)
+            evaluation.step(end_points, batch_idx*BATCH_SIZE)
 
         total_loss += loss * BATCH_SIZE
     
@@ -242,7 +252,7 @@ def train_one_epoch():
 
     if EPOCH_CNT == 0 or EPOCH_CNT % 10 == 9: # Eval every 10 epochs
         print("\n------------------------------------------")
-        class_mean_accuracy, t, r, s, eval_dict = evaluation.summary()
+        instance_mean_accuracy, class_mean_accuracy, t, r, s, eval_dict = evaluation.summary()
 
         for key in sorted(eval_dict.keys()):
             log_string("train {:>10s}: {:>4.4f} \t ({:>4d}/{:>4d})".format(key, eval_dict[key][0], eval_dict[key][1], eval_dict[key][2]))
@@ -253,7 +263,8 @@ def train_one_epoch():
         log_string('train class mean rotation:   %f'%(r))
         log_string('train class mean scale:      %f'%(s))
         print("------------------------------------------")
-        log_string('train class mean accuracy: %f'%(class_mean_accuracy))
+        log_string('train class mean accuracy:  %f'%(class_mean_accuracy))
+        log_string('train scan  mean accuracy:  %f'%(instance_mean_accuracy))
         print("------------------------------------------\n")
     
     return total_loss / n, class_mean_accuracy
@@ -306,7 +317,7 @@ def evaluate_one_epoch():
 
     class_mean_accuracy = 0 
     if EPOCH_CNT == 0 or EPOCH_CNT % 10 == 9: # Eval every 10 epochs
-        class_mean_accuracy, t, r, s, eval_dict = evaluation.summary()
+        instance_mean_accuracy, class_mean_accuracy, t, r, s, eval_dict = evaluation.summary()
 
         print("\n--------- EVALUATION PER CLASS -----------")
         for key in sorted(eval_dict.keys()):
@@ -319,6 +330,7 @@ def evaluate_one_epoch():
         log_string('eval class mean scale:      %f'%(s))
         print("------------------------------------------")
         log_string('eval class mean accuracy:   %f'%(class_mean_accuracy))
+        log_string('eval scan  mean accuracy:   %f'%(instance_mean_accuracy))
         print("------------------------------------------\n")
 
     return mean_loss, class_mean_accuracy
@@ -357,7 +369,7 @@ def train(start_epoch):
             save_dict['model_state_dict'] = net.module.state_dict()
         except:
             save_dict['model_state_dict'] = net.state_dict()
-        torch.save(save_dict, os.path.join(LOG_DIR, 'checkpoint.tar'))
+        torch.save(save_dict, CHECKPOINT_PATH)
 
 if __name__=='__main__':
     train(start_epoch)

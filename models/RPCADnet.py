@@ -61,7 +61,6 @@ class RPCADNet(nn.Module):
         """
         end_points = {}
         point_cloud = inputs['point_clouds']
-        pred_bboxes = np.zeros(shape=(1, self.num_proposal, 6), dtype=np.float32)
         batch_size = inputs['point_clouds'].shape[0]
 
         end_points = self.backbone_net(inputs['point_clouds'], end_points)

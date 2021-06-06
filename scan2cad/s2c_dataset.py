@@ -10,7 +10,7 @@ ROOT_DIR = os.path.dirname(BASE_DIR)
 sys.path.append(BASE_DIR)
 
 # import scan2cad_utils
-from scan2cad.s2c_config import Scan2CADDatasetConfig
+from s2c_config import Scan2CADDatasetConfig
 import s2c_utils
 
 DC = Scan2CADDatasetConfig()
@@ -57,26 +57,29 @@ def make_M_from_tqs(t, q, s):
 
 class Scan2CADDataset(Dataset):
     def __init__(self, split_set='train', num_points=40000, augment=False):
-        self.data_path = os.path.join(BASE_DIR, 'scannet_data')
+        self.data_path = os.path.join(BASE_DIR, 'scan2cad_data')
         filename_json = BASE_DIR + "/full_annotations.json"
         assert filename_json
 
         all_scan_names = list(set([os.path.basename(x)[0:12] \
             for x in os.listdir(self.data_path) if x.startswith('scene')]))
 
+        self.scan_names = []
+
+        # Split scan list
         if split_set=='all':            
-            self.scan_names = all_scan_names
+            self.scan_list = all_scan_names
         elif split_set in ['train', 'val', 'test']:
             split_filenames = os.path.join(BASE_DIR, 'scannet_meta',
                 'scan2cad_{}.txt'.format(split_set))
             with open(split_filenames, 'r') as f:
-                self.scan_names = f.read().splitlines()   
+                self.scan_list = f.read().splitlines()   
             # remove unavailiable scans
-            num_scans = len(self.scan_names)
-            self.scan_names = [sname for sname in self.scan_names \
+            num_scans = len(self.scan_list)
+            self.scan_list = [sname for sname in self.scan_list \
                 if sname in all_scan_names]
-            print('Dataset for {}: kept {} scans out of {}'.format(split_set, len(self.scan_names), num_scans))
-            num_scans = len(self.scan_names)
+            print('Dataset for {}: kept {} scans out of {}'.format(split_set, len(self.scan_list), num_scans))
+            num_scans = len(self.scan_list)
         else:
             print('illegal split name')
             return
@@ -89,7 +92,9 @@ class Scan2CADDataset(Dataset):
             i = -1
             for idx, r in enumerate(data):
                 i_scan = r["id_scan"]
-                if i_scan not in self.scan_names: continue
+                if i_scan not in self.scan_list: 
+                    continue
+                self.scan_names.append(i_scan)
                 i += 1
                 d[i] = {}
                 d[i]['id_scan'] = i_scan
@@ -117,6 +122,12 @@ class Scan2CADDataset(Dataset):
 
     def __len__(self):
         return len(self.dataset)
+
+    def get_alignment_matrix(self, index):
+        data = self.dataset[index]
+        id_scan = data['id_scan']
+        m_scan = make_M_from_tqs(data['trs']['translation'], data['trs']['rotation'], data['trs']['scale'])
+        return id_scan, m_scan
 
     def __getitem__(self, index):  
         data = self.dataset[index]
@@ -161,7 +172,7 @@ class Scan2CADDataset(Dataset):
         target_scale    = target_obj_alignments[:, 7:10].copy()
         target_sym      = target_obj_symmetry.copy()
 
-        # # ------------------------------- DATA AUGMENTATION ------------------------------
+        # =========================== DATA AUGMENTATION ===========================
         if self.augment:
             # Rotation along up-axis/Y-axis
             rot_angle = (np.random.random()*np.pi/3) - np.pi/6 # -30 ~ +30 degree
@@ -169,10 +180,8 @@ class Scan2CADDataset(Dataset):
 
             # Rotate point cloud
             point_cloud[:,0:3] = np.dot(point_cloud[:,0:3], np.transpose(rot_mat))
-
             # Rotate Center
             target_center[:,0:3] = np.dot(target_center[:,0:3], np.transpose(rot_mat))
-
             # Rotate Rotation
             target_R = np.zeros((K, 3, 3))
             rot_mat_q = roty(-rot_angle)
@@ -193,12 +202,13 @@ class Scan2CADDataset(Dataset):
 
                 # --- Rotation-6D Representation ---
                 target_obj_6d_rotation[model, :] = from_q_to_6d(target_rotation[model, :])
-
-        # ------ VOTES ------
+        # =============================================================================
+        # ------ GENERATE VOTES ------
         # Generate Votes 
         point_votes             = np.zeros([self.num_points, 3])
         point_votes_mask        = np.zeros(self.num_points)
 
+        # Lift Center (from Scannet to Scan2CAD)
         ddict = {}
         point_to_cad = {}
         for i_instance in np.unique(instance_labels):         
@@ -255,21 +265,21 @@ class Scan2CADDataset(Dataset):
         # ----- LABEL -----
         label = {}
         label['point_clouds'] = point_cloud.astype(np.float32)
-        
+        label['n_total'] = np.array(K).astype(np.int64)
+        # Bounding Box
         label['center_label'] = target_center.astype(np.float32)
         label['box_mask_label'] = target_bboxes_mask.astype(np.float32)
         label['box_size_label'] = target_bboxes_size.astype(np.float32) 
-        
+        # Alignment
         label['rotation_label'] = target_rotation.astype(np.float32)
         label['rot_6d_label'] = target_obj_6d_rotation.astype(np.float32)
         label['scale_label'] = target_scale.astype(np.float32)
-
+        # Votes
         label['vote_label'] = point_votes.astype(np.float32)
         label['vote_label_mask'] = point_votes_mask.astype(np.int64)
-
+        # Semantic class
         label['sem_cls_label'] = target_cls.astype(np.int64)
         label['cad_sym_label'] = target_sym.astype(np.int64)
-        label['n_total'] = np.array(K).astype(np.int64)
 
         return label
 

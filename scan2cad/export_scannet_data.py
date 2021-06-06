@@ -10,9 +10,9 @@ sys.path.append(BASE_DIR)
 
 TRAIN_DIR = os.path.join(HOME_DIR, "Dataset/ScanNet/scans/")
 VAL_DIR = os.path.join(HOME_DIR, "Dataset/ScanNet/scans_test/")
-OUTPUT_DIR = "./scannet_data"
+OUTPUT_DIR = os.path.join(BASE_DIR, "./scan2cad_data")
 
-from scan2cad.s2c_config import Scan2CADDatasetConfig
+from s2c_config import Scan2CADDatasetConfig
 from s2c_dataset import Scan2CADDataset
 
 META_DIR = os.path.join(BASE_DIR, 'scannet_meta')
@@ -20,7 +20,7 @@ LABEL_MAP_FILE = META_DIR + '/scannetv2-labels.combined.tsv'
 MAX_NUM_POINT = 40000
 
 DC = Scan2CADDatasetConfig()
-ClassToName = {int(DC.ShapeNetNameToClass[k]):k for k in DC.ShapeNetNameToClass}
+ClassToName = {int(DC.ShapenetNameToClass[k]):k for k in DC.ShapenetNameToClass}
 print(ClassToName)
 
 def read_aggregation(filename):
@@ -67,7 +67,7 @@ def represents_int(s):
 
 def label_mapping(filename, label_from='raw_category', label_to='ShapeNetCore55'):
     assert os.path.isfile(filename)
-    mapping = dict()
+    mapping = {}
 
     with open(filename) as csvfile:
         reader = csv.DictReader(csvfile, delimiter='\t')
@@ -88,7 +88,7 @@ def label_mapping(filename, label_from='raw_category', label_to='ShapeNetCore55'
                 mapping[row[label_from]] = 'washer'
             elif row[label_from] == 'file cabinet' or row[label_from] == 'file cabinets':
                 mapping[row[label_from]] = 'file cabinet'
-            elif row[label_to] not in DS.ShapeNetNameToClass:
+            elif row[label_to] not in DC.ShapenetNameToClass:
                 mapping[row[label_from]] = 'other'
             else:
                 mapping[row[label_from]] = row[label_to]
@@ -139,8 +139,8 @@ def export(scan_name, matrix, output_file, train=True):
     object_id_to_label_id = {}
     for label, segs in label_to_segs.items():
         label_str = label_map[label]
-        assert DC.ShapeNetNameToClass[label_str]
-        label_id = int(DC.ShapeNetNameToClass[label_str])
+        assert DC.ShapenetNameToClass[label_str] is not None
+        label_id = int(DC.ShapenetNameToClass[label_str])
         for seg in segs:
             verts = seg_to_verts[seg]
             label_ids[verts] = label_id
@@ -181,7 +181,6 @@ def export(scan_name, matrix, output_file, train=True):
             object_status[ClassToName[label_id]] += 1
 
     print(sorted(object_status.items(), key=lambda item: item[1], reverse=True))
-    print('')
 
     N = mesh_vertices.shape[0]
     if N > MAX_NUM_POINT:
@@ -200,7 +199,7 @@ def export(scan_name, matrix, output_file, train=True):
         instance_bboxes, object_id_to_label_id
 
 if __name__ == '__main__':
-    condition = 'val'   # 'train'
+    condition = 'all' 
     DATASET = Scan2CADDataset(split_set=condition)
     for idx, scan_name in enumerate(DATASET.scan_names):
         id_scan, i_matrix = DATASET.get_alignment_matrix(idx)

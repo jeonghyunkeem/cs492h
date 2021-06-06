@@ -34,8 +34,8 @@ print(device)
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', default='votenet', help='Model file name [default: votenet]')
-parser.add_argument('--dataset', default='sunrgbd', help='Dataset name. sunrgbd or scannet. [default: sunrgbd]')
-parser.add_argument('--checkpoint_path', default='./result/checkpoint.tar', help='Model checkpoint path [default: None]')
+parser.add_argument('--dataset', default='scan2cad', help='Dataset name. sunrgbd or scannet. [default: sunrgbd]')
+parser.add_argument('--checkpoint_path', default='./log_rp/checkpoint_rpcad.tar', help='Model checkpoint path [default: None]')
 parser.add_argument('--dump_dir', default='./result/dump', help='Dump dir to save sample outputs [default: None]')
 parser.add_argument('--num_point', type=int, default=20000, help='Point Number [default: 20000]')
 parser.add_argument('--num_target', type=int, default=256, help='Point Number [default: 256]')
@@ -86,7 +86,7 @@ TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size = BATCH_SIZE, shuffle=True
 DATASET_CONFIG = Scan2CADDatasetConfig()
 
 # Init the model and optimzier
-MODEL = importlib.import_module('votenet_rpcad')
+MODEL = importlib.import_module('RPCADnet')
 num_input_channel = int(FLAGS.use_color)*3 + int(not FLAGS.no_height)*1
 num_input_channel = 0
 
@@ -97,8 +97,7 @@ net = Detector(num_class=DATASET_CONFIG.num_class,
                input_feature_dim=num_input_channel,
                num_proposal=FLAGS.num_target,
                vote_factor=FLAGS.vote_factor,
-               sampling=FLAGS.cluster_sampling,
-               device=device)
+               sampling=FLAGS.cluster_sampling)
 
 net.to(device)
 criterion = MODEL.get_loss
@@ -109,8 +108,8 @@ optimizer = optim.Adam(net.parameters(), lr=0.001)
 # Load checkpoint if there is any
 if CHECKPOINT_PATH is not None and os.path.isfile(CHECKPOINT_PATH):
     checkpoint = torch.load(CHECKPOINT_PATH)
-    # net.load_state_dict(checkpoint['model_state_dict'])
-    # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    net.load_state_dict(checkpoint['model_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     epoch = checkpoint['epoch']
     log_string("Loaded checkpoint %s (epoch: %d)"%(CHECKPOINT_PATH, epoch))
 
@@ -151,11 +150,11 @@ def evaluate_one_epoch():
                 if key not in stat_dict: stat_dict[key] = 0
                 stat_dict[key] += end_points[key].item()
 
-        evaluation.step(end_points)
+        evaluation.step(end_points, batch_idx*BATCH_SIZE, pcd=batch_data_label['point_clouds'])
     
         # Dump evaluation results for visualization
-        if batch_idx == 0:
-            MODEL.dump_results(end_points, DUMP_DIR, DATASET_CONFIG)
+        # if batch_idx == 0:
+        #     MODEL.dump_results(end_points, DUMP_DIR, DATASET_CONFIG)
 
     # Log statistics
     for key in sorted(stat_dict.keys()):
@@ -164,20 +163,21 @@ def evaluate_one_epoch():
     mean_loss = stat_dict['loss']/float(batch_idx+1)
 
     class_mean_accuracy = 0 
-    if EPOCH_CNT == 0 or EPOCH_CNT % 10 == 9: # Eval every 10 epochs
-        class_mean_accuracy, t, r, s, eval_dict = evaluation.summary()
-        print("\n--------- EVALUATION PER CLASS -----------")
-        for key in sorted(eval_dict.keys()):
-            log_string("eval {:>10s}: {:>4.4f} \t ({:>4d}/{:>4d})".format(key, eval_dict[key][0], eval_dict[key][1], eval_dict[key][2]))
-            log_string("    \t (t:{:>4d}, r:{:>4d}, s:{:>4d} / {:>4d})".format(eval_dict[key][3], eval_dict[key][4], eval_dict[key][5], eval_dict[key][6]))
+    
+    instance_mean_accuracy, class_mean_accuracy, t, r, s, eval_dict = evaluation.summary()
+    print("\n--------- EVALUATION PER CLASS -----------")
+    for key in sorted(eval_dict.keys()):
+        log_string("eval {:>10s}: {:>4.4f} \t ({:>4d}/{:>4d})".format(key, eval_dict[key][0], eval_dict[key][1], eval_dict[key][2]))
+        log_string("    \t (t:{:>4d}, r:{:>4d}, s:{:>4d} / {:>4d})".format(eval_dict[key][3], eval_dict[key][4], eval_dict[key][5], eval_dict[key][6]))
 
-        print("------------------------------------------")
-        log_string('eval class mean center:     %f'%(t))
-        log_string('eval class mean rotation:   %f'%(r))
-        log_string('eval class mean scale:      %f'%(s))
-        print("------------------------------------------")
-        log_string('eval class mean accuracy:   %f'%(class_mean_accuracy))
-        print("------------------------------------------\n")
+    print("------------------------------------------")
+    log_string('eval class mean center:     %f'%(t))
+    log_string('eval class mean rotation:   %f'%(r))
+    log_string('eval class mean scale:      %f'%(s))
+    print("------------------------------------------")
+    log_string('eval class mean accuracy:   %f'%(class_mean_accuracy))
+    log_string('eval scan  mean accuracy:   %f'%(instance_mean_accuracy))
+    print("------------------------------------------\n")
 
     return mean_loss
 

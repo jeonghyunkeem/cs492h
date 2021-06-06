@@ -3,10 +3,15 @@ import numpy as np
 import quaternion
 import os
 import s2c_utils
+import pickle
 
 ShapenetNameToClass = {'chair': 0, 'table': 1, 'cabinet': 2, 'trash bin': 3, 'bookshelf': 4,'display': 5,'sofa': 6, 'bathtub': 7, 'other': 8}
 ShapenetClassToName = {ShapenetNameToClass[k]: k for k in ShapenetNameToClass}
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(BASE_DIR)
+RET_DIR = os.path.join(ROOT_DIR, 'models/retrieval/dump')
+from models.retrieval.autoencoder import PointNetAE
 
 def from_6d_to_mat(v):
     v1 = v[:,:,:3].unsqueeze(-1)  # (B, K, 3, 1)
@@ -58,6 +63,7 @@ class Evaluation:
     def __init__(self, nms_iou=0.25):
         self.class_total = {}
         self.pred_total = {}
+        self.acc_per_scan = {}
         self.acc_proposal_per_class = {}
         self.acc_translation_per_class = {}
         self.acc_rotation_per_class = {}
@@ -74,7 +80,17 @@ class Evaluation:
         self.validate_idx_per_scene = {}
         self.nms_iou = nms_iou
         self.extra_dict = {}
-    
+
+        # CAD Retrieval
+        self.sem_clses = np.load(RET_DIR + '/all_category.npy')
+        print(np.unique(self.sem_clses))
+        self.filenames = np.load(RET_DIR + '/all_filenames.npy')
+        self.CADnet = PointNetAE(latent=512, in_dims=3, n_points=2048)
+        self.CADnet.load_state_dict(torch.load(RET_DIR + '/model512_50.pth'))
+        self.CADnet.cuda()
+        self.CADnet.eval()
+
+
     def NMS(self, B, K, center, size, obj_prob, sem_cls):
         pred_crnrs_3d_upright_cam = np.zeros((B, K, 8, 3))
         for b in range(B):
@@ -103,7 +119,7 @@ class Evaluation:
         return pred_mask
         # ---------- NMS output: pred_mask in (B,K) -----------
 
-    def step(self, end_points):
+    def step(self, end_points, batch_iter, pcd=None):
         gt_center = end_points['center_label']
         pred_center = end_points['center']
         B = gt_center.shape[0]      # Batch size
@@ -120,10 +136,13 @@ class Evaluation:
 
         # prediction
         pred_class      = torch.argmax(end_points['sem_cls_scores'], -1).reshape(B, K, 1)
-        pred_center     = end_points['center'].detach().cpu().numpy()       
+        pred_center     = end_points['center'].detach().cpu().numpy() 
+        pred_size       = end_points['box_size'].detach().cpu().numpy()
+
         pred_rot_6d     = end_points['rot_6d_scores'] # (B, K, 6)
         pred_quaternion = from_6d_to_q(pred_rot_6d)
-        #                                                                                                                                               pred_quaternion = end_points['rotation_scores'].detach().cpu().numpy() # (B, K, 6)
+        # pred_quaternion = end_points['rotation_scores'].detach().cpu().numpy() # (B, K, 4)
+
         pred_scale      = end_points['scale_scores'].detach().cpu().numpy()    
         pred_obj_logits = end_points['objectness_scores'].detach().cpu().numpy()
         
@@ -152,12 +171,19 @@ class Evaluation:
 
         # Change category
         for b in range(B):
+            
             for k in range(K):
                 pred_class[b,k,:] = get_top_8_category(pred_class[b,k,:])
             for k2 in range(K2):
                 gt_class[b,k2,:] = get_top_8_category(gt_class[b,k2,:])
 
+        acc_per_scan = {}
         for b in range(B):
+            acc_per_scan[batch_iter + b] = {}
+            acc_per_scan[batch_iter + b]['n_total'] = gt_cad_total[b]
+            acc_per_scan[batch_iter + b]["n_good"] = 0
+            acc_per_scan[batch_iter + b]["n_files"] = []
+
             self.validate_idx_per_scene[b] = []
             K2 = gt_cad_total[b] # GT_cad_in_one_scene
             for k_gt in range(K2):
@@ -169,79 +195,120 @@ class Evaluation:
                 else:
                     class_total[gt_sem_cls] += 1
 
+        # CAD Retrieval
+        if pcd is not None:
+            batch_pc = pcd.cpu().numpy()[:,:,0:3]   # (B, N, 3)
+
         for b in range(B):  # loop in scenes
             K2 = gt_cad_total[b] # GT_cad_in_one_scene
             pred_gt = []
-            for k in np.where(pred_mask[b, :] == 1)[0]:  # loop in proposals
-                pred_sem_cls = pred_class[b, k, :][0]
-                for k_gt in range(K2):
-                    # Pass predicted ground-truth
-                    if k_gt in pred_gt: continue
+            with open(RET_DIR + '/shapenet_kdtree.pickle', 'rb') as pickle_file:
+                database_kdtree = pickle.load(pickle_file)
+                for k in np.where(pred_mask[b, :] == 1)[0]:  # loop in proposals           
+                    # Class prediction
+                    if pcd is not None:
+                        box3d = s2c_utils.get_3d_box(pred_size[b,k,:3], 0, pred_center[b,k,:3])
+                        box3d = s2c_utils.flip_axis_to_depth(box3d)
+                        pc_in_box, inds = s2c_utils.extract_pc_in_box3d(batch_pc[b,:,:3], box3d)
+                        if len(pc_in_box) < 5:
+                            continue
+                        cad_inds = np.where(inds == True)
+                        cad_pc = pcd[b, cad_inds, :3]
+                        embedding = self.CADnet(cad_pc, r=True)
+                        embedding = embedding.detach().cpu()
+                        dist, pred_idx = database_kdtree.query(embedding, k=5)
+                        # Output
+                        pred_sem_clses = self.sem_clses[pred_idx].squeeze(0)
+                        cad_files      = self.filenames[pred_idx].squeeze(0)
+                    else:
+                        pred_sem_cls = pred_class[b, k, :][0]
+                    for k_gt in range(K2):
+                        # Pass predicted ground-truth
+                        if k_gt in pred_gt: continue
 
-                    # ------ Compare Prediction with GT ------
-                    gt_sem_cls = gt_class[b,k_gt,:].item()
-                    # Only compare with same class
-                    is_same_class = pred_sem_cls == gt_sem_cls
-                    if is_same_class:
-                        pred_total[gt_sem_cls] += 1
-                        # Predicted Transformation
-                        c = pred_center[b,k,:]
-                        q = pred_quaternion[b,k]
-                        #                                                                                                                                                           q = np.quaternion(q0[0], q0[1], q0[2], q0[3])
-                        s = pred_scale[b,k,:]
+                        # ------ Compare Prediction with GT ------
+                        gt_sem_cls = gt_class[b,k_gt,:].item()
+                        pred_sem_cls = -1
+                        # Only compare with same class
+                        for i in range(5):
+                            if pred_sem_clses[i] > 8: 
+                                pred_sem_clses[i] = 8 
+                            if pred_sem_clses[i] == gt_sem_cls:
+                                pred_sem_cls = pred_sem_clses[i, 0:1]
+                                cad_file = cad_files[i, 0:1]
 
-                        # Ground-truth Transformation
-                        c_gt = gt_center[b,k_gt,:]
-                        q_gt0 = gt_quaternion[b,k_gt,:]
-                        q_gt = np.quaternion(q_gt0[0], q_gt0[1], q_gt0[2], q_gt0[3])
-                        s_gt = gt_scale[b,k_gt,:]
+                        is_same_class = pred_sem_cls == gt_sem_cls
+                        if is_same_class:
+                            pred_total[gt_sem_cls] += 1
+                            # Predicted Transformation
+                            c = pred_center[b,k,:]
+                            # q0 = pred_quaternion[b,k]
+                            # q = np.quaternion(q0[0], q0[1], q0[2], q0[3])
+                            q = pred_quaternion[b,k]
+                            #                                                                                                                                                           q = np.quaternion(q0[0], q0[1], q0[2], q0[3])
+                            s = pred_scale[b,k,:]
 
-                        # ---- Compute Error ----
-                        # CENTER
-                        error_translation = np.linalg.norm(c-c_gt, ord=2)
-                        if error_translation <= threshold_translation: 
-                            acc_translation_per_class[gt_sem_cls] += 1
+                            # Ground-truth Transformation
+                            c_gt = gt_center[b,k_gt,:]
+                            q_gt0 = gt_quaternion[b,k_gt,:]
+                            q_gt = np.quaternion(q_gt0[0], q_gt0[1], q_gt0[2], q_gt0[3])
+                            s_gt = gt_scale[b,k_gt,:]
 
-                        # SCALE
-                        error_scale = 100.0*np.abs(np.mean(s/s_gt) - 1)
-                        if error_scale <= threshold_scale: 
-                            acc_scale_per_class[gt_sem_cls] += 1
+                            # ---- Compute Error ----
+                            # CENTER
+                            error_translation = np.linalg.norm(c-c_gt, ord=2)
+                            if error_translation <= threshold_translation: 
+                                acc_translation_per_class[gt_sem_cls] += 1
 
-                        # ROTATION
-                        sym = gt_sym_label[b, k_gt].item()
-                        if sym == 1:
-                            m = 2
-                            tmp = [calc_rotation_diff(q, q_gt*quaternion.from_rotation_vector([0, (i*2.0/m)*np.pi, 0])) for i in range(m)]
-                            error_rotation = np.min(tmp)
-                        elif sym == 2:
-                            m = 4
-                            tmp = [calc_rotation_diff(q, q_gt*quaternion.from_rotation_vector([0, (i*2.0/m)*np.pi, 0])) for i in range(m)]
-                            error_rotation = np.min(tmp)
-                        elif sym == 3:
-                            m = 36
-                            tmp = [calc_rotation_diff(q, q_gt*quaternion.from_rotation_vector([0, (i*2.0/m)*np.pi, 0])) for i in range(m)]
-                            error_rotation = np.min(tmp)
-                        else:
-                            error_rotation = calc_rotation_diff(q, q_gt)
+                            # SCALE
+                            error_scale = 100.0*np.abs(np.mean(s/s_gt) - 1)
+                            if error_scale <= threshold_scale: 
+                                acc_scale_per_class[gt_sem_cls] += 1
 
-                        if error_rotation <= threshold_rotation:
-                            acc_rotation_per_class[gt_sem_cls] += 1
-                        
-                        # CHECK ANSWER
-                        is_valid_transformation = error_rotation <= threshold_rotation and error_translation <= threshold_translation and error_scale <= threshold_scale
-
-                        if is_valid_transformation:
-                            if gt_sem_cls not in acc_proposal_per_class:
-                                acc_proposal_per_class[gt_sem_cls] = 1
+                            # ROTATION
+                            sym = gt_sym_label[b, k_gt].item()
+                            if sym == 1:
+                                m = 2
+                                tmp = [calc_rotation_diff(q, q_gt*quaternion.from_rotation_vector([0, (i*2.0/m)*np.pi, 0])) for i in range(m)]
+                                error_rotation = np.min(tmp)
+                            elif sym == 2:
+                                m = 4
+                                tmp = [calc_rotation_diff(q, q_gt*quaternion.from_rotation_vector([0, (i*2.0/m)*np.pi, 0])) for i in range(m)]
+                                error_rotation = np.min(tmp)
+                            elif sym == 3:
+                                m = 36
+                                tmp = [calc_rotation_diff(q, q_gt*quaternion.from_rotation_vector([0, (i*2.0/m)*np.pi, 0])) for i in range(m)]
+                                error_rotation = np.min(tmp)
                             else:
-                                acc_proposal_per_class[gt_sem_cls] += 1
-                            
-                            self.validate_idx_per_scene[b].append(k)
-                            pred_gt.append(k_gt)
-                            break
-                
+                                error_rotation = calc_rotation_diff(q, q_gt)
 
+                            if error_rotation <= threshold_rotation:
+                                acc_rotation_per_class[gt_sem_cls] += 1
+                            
+                            # CHECK ANSWER
+                            is_valid_transformation = error_rotation <= threshold_rotation and error_translation <= threshold_translation and error_scale <= threshold_scale
+
+                            if is_valid_transformation:
+                                acc_per_scan[batch_iter + b]["n_good"] += 1
+                                acc_per_scan[batch_iter + b]["n_files"].append(cad_file)
+                                if gt_sem_cls not in acc_proposal_per_class:
+                                    acc_proposal_per_class[gt_sem_cls] = 1
+                                else:
+                                    acc_proposal_per_class[gt_sem_cls] += 1
+                                
+                                self.validate_idx_per_scene[b].append(k)
+                                pred_gt.append(k_gt)
+                                break
+                
+        # print(acc_per_scan)
         # Update
+        for b in range(B):
+            b_id_scan = batch_iter + b
+            self.acc_per_scan[b_id_scan] = {}
+            self.acc_per_scan[b_id_scan]["n_total"] = acc_per_scan[b_id_scan]["n_total"].item()
+            self.acc_per_scan[b_id_scan]["n_good"] = acc_per_scan[b_id_scan]["n_good"]
+            self.acc_per_scan[b_id_scan]["n_files"] = acc_per_scan[b_id_scan]["n_files"]
+
         for sem_cls, n_total in class_total.items():
             self.class_total[sem_cls]               += n_total
             self.pred_total[sem_cls]                += pred_total[sem_cls]
@@ -258,6 +325,15 @@ class Evaluation:
         good_r_per_class = {}
         good_s_per_class = {}
 
+        # Per scan
+        total_accuracy = {"n_total": 0, "n_good": 0}
+        for id_scan in self.acc_per_scan:
+            total_accuracy["n_total"] += self.acc_per_scan[id_scan]["n_total"]
+            total_accuracy["n_good"] += self.acc_per_scan[id_scan]["n_good"]
+        
+        instance_mean_accuracy = float(total_accuracy["n_good"])/total_accuracy["n_total"]
+
+        # Per class
         for sem_cls, n_total in self.class_total.items():
             cat_name = ShapenetClassToName[sem_cls]
             prediction = self.acc_proposal_per_class[sem_cls]
@@ -279,4 +355,4 @@ class Evaluation:
         class_mean_rotation     = np.mean([v for k,v in good_r_per_class.items()])
         class_mean_scale        = np.mean([v for k,v in good_s_per_class.items()])
 
-        return class_mean_accuracy, class_mean_translation, class_mean_rotation, class_mean_scale, eval_dict
+        return instance_mean_accuracy, class_mean_accuracy, class_mean_translation, class_mean_rotation, class_mean_scale, eval_dict

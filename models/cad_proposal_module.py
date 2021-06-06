@@ -54,9 +54,9 @@ def decode_scores(net, net2, end_points):
     end_points['scale_scores'] = scale_scores
 
     rotation_scores = net2_transposed[:,:,7:]
-    end_points['rot_6d_scores'] = rotation_scores
-    # rotation_scores = net2_transposed[:,:,0:4]
-    # end_points['rotation_scores'] = rotation_scores # Bxnum_proposalx(4 or 6)
+    end_points['rot_6d_scores'] = rotation_scores # Bxnum_proposalx6
+    # rotation_scores = net2_transposed[:,:,7:]
+    # end_points['rotation_scores'] = rotation_scores # Bxnum_proposalx4
 
     return end_points
 
@@ -69,7 +69,6 @@ class ProposalModule(nn.Module):
         self.num_proposal = num_proposal
         self.sampling = sampling
         self.seed_feat_dim = seed_feat_dim
-        self.pred_bboxes = np.zeros(shape=(1, num_proposal, 6), dtype=np.float32)
 
         # Vote clustering
         self.vote_aggregation = PointnetSAModuleVotes( 
@@ -87,7 +86,7 @@ class ProposalModule(nn.Module):
         self.conv3 = torch.nn.Conv1d(128,
                                     2 + # Objectness
                                     3 + # Center Regression
-                                    3 +  # Box Size Regression
+                                    3 + # Box Size Regression
                                     self.num_class, # Num of classes
                                     1)
         self.bn1 = torch.nn.BatchNorm1d(128)
@@ -101,22 +100,23 @@ class ProposalModule(nn.Module):
         # self.CADnet.eval()    
 
         # Transform Prediction - from Box-Crop (Linear)
-        self.box_conv1 = torch.nn.Conv1d(3,64,1)
-        self.box_conv2 = torch.nn.Conv1d(64,64,1)
-        self.box_conv3 = torch.nn.Conv1d(64,128,1)
-        self.box_conv4 = torch.nn.Conv1d(128,128,1)
-        self.box_bn1 = torch.nn.BatchNorm1d(64)
-        self.box_bn2 = torch.nn.BatchNorm1d(64)
-        self.box_bn3 = torch.nn.BatchNorm1d(128)
-        self.box_bn4 = torch.nn.BatchNorm1d(128)
+        # self.box_conv1 = torch.nn.Conv1d(3,64,1)
+        # self.box_conv2 = torch.nn.Conv1d(64,64,1)
+        # self.box_conv3 = torch.nn.Conv1d(64,128,1)
+        # self.box_conv4 = torch.nn.Conv1d(128,128,1)
+        # self.box_bn1 = torch.nn.BatchNorm1d(64)
+        # self.box_bn2 = torch.nn.BatchNorm1d(64)
+        # self.box_bn3 = torch.nn.BatchNorm1d(128)
+        # self.box_bn4 = torch.nn.BatchNorm1d(128)
 
         # Transform Prediction - from Votes
+        self.rot_param = 6
         self.cad_conv1 = torch.nn.Conv1d(128,128,1)
         self.cad_conv2 = torch.nn.Conv1d(128,128,1)
         self.cad_conv3 = torch.nn.Conv1d(128, 
                                         4 + # Symmetry
                                         3 + # Scale 
-                                        6,  # Rotation (6D)
+                                        self.rot_param,  # Rotation (6D)
                                         1)   
         self.cad_bn1 = torch.nn.BatchNorm1d(128)
         self.cad_bn2 = torch.nn.BatchNorm1d(128)
@@ -253,12 +253,12 @@ class ProposalModule(nn.Module):
         end_points['aggregated_vote_inds'] = sample_inds # (batch_size, num_proposal,) # should be 0,1,2,...,num_proposal
 
         # --------- LEARNING RELATION ---------
-        # Self-attetion
+        # For CGNL
         feature_dim = features.shape[1]
         batch_size = features.shape[0]
-        features1 = features.contiguous().view(batch_size, feature_dim, 8, 8)
+        features1 = features.contiguous().view(batch_size, feature_dim, 16, 16)
         
-        # --------- BOX PROPOSAL GENERATION ---------
+        # # --------- BOX PROPOSAL GENERATION ---------
         # votes relation
         net1 = self.sa1_1(features1)
         net1 = self.sa2_1(net1)
@@ -270,8 +270,8 @@ class ProposalModule(nn.Module):
         
         # --------- CAD ALGINMENT ESTIMATION ---------
         # Points Cropping by Box
-        features2 = self.BoxCropping(point_cloud, net1)
-        features2 = features.contiguous().view(batch_size, feature_dim, 8, 8)
+        # features2 = self.BoxCropping(point_cloud, net1)
+        features2 = features.contiguous().view(batch_size, feature_dim, 16, 16)
 
         # Alignment Relation
         net2 = self.sa1_2(features2)
@@ -281,12 +281,14 @@ class ProposalModule(nn.Module):
         net2 = F.relu(self.cad_bn1(self.cad_conv1(net2)))
         net2 = F.relu(self.cad_bn2(self.cad_conv2(net2)))
         net2 = self.cad_conv3(net2) # (batch_size, symmetry(4)+scale(3)+rotation(6), num_proposal)
+
         # 6D Representation
-        rot_6d = net2.transpose(2,1)[:, :, 7:].contiguous() # (B, K, 6)
-        e1 = F.normalize(rot_6d[:,:,:3], p=2, dim=-1)
-        w = torch.bmm(e1.view(-1, 1,3), rot_6d[:,:,3:].view(-1,3,1)).view(rot_6d.shape[0],rot_6d.shape[1],1)
-        e2 = F.normalize(rot_6d[:,:,3:] - w * e1, p=2, dim=-1)
-        net2[:,7:,:] = torch.cat((e1, e2), dim=2).transpose(1,2)
+        if self.rot_param > 4:
+            rot_6d = net2.transpose(2,1)[:, :, 7:].contiguous() # (B, K, 6)
+            e1 = F.normalize(rot_6d[:,:,:3], p=2, dim=-1)
+            w = torch.bmm(e1.view(-1, 1,3), rot_6d[:,:,3:].view(-1,3,1)).view(rot_6d.shape[0],rot_6d.shape[1],1)
+            e2 = F.normalize(rot_6d[:,:,3:] - w * e1, p=2, dim=-1)
+            net2[:,7:,:] = torch.cat((e1, e2), dim=2).transpose(1,2)
 
         # --------- DECODE SCORES ---------
         end_points = decode_scores(net1, net2, end_points=end_points)
