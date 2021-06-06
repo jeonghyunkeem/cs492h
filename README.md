@@ -1,4 +1,4 @@
-# CS492H
+# CS492H (Jeonghyun Kim ID:13)
 
 Predicting CAD Alignment on Indoor 3D Scans with Object Relation Prior (Research Track)
 
