@@ -228,14 +228,16 @@ class Evaluation:
 
                         # ------ Compare Prediction with GT ------
                         gt_sem_cls = gt_class[b,k_gt,:].item()
-                        pred_sem_cls = -1
-                        # Only compare with same class
-                        for i in range(5):
-                            if pred_sem_clses[i] > 8: 
-                                pred_sem_clses[i] = 8 
-                            if pred_sem_clses[i] == gt_sem_cls:
-                                pred_sem_cls = pred_sem_clses[i, 0:1]
-                                cad_file = cad_files[i, 0:1]
+                        if pcd is not None:
+                            gt_sem_cls += 1
+                            pred_sem_cls = -1
+                            # Only compare with same class
+                            for i in range(5):
+                                if pred_sem_clses[i] > 8: 
+                                    pred_sem_clses[i] = 8 
+                                if pred_sem_clses[i] == gt_sem_cls:
+                                    pred_sem_cls = pred_sem_clses[i, 0:1]
+                                    cad_file = cad_files[i, 0:1]
 
                         is_same_class = pred_sem_cls == gt_sem_cls
                         if is_same_class:
@@ -290,12 +292,15 @@ class Evaluation:
 
                             if is_valid_transformation:
                                 acc_per_scan[batch_iter + b]["n_good"] += 1
-                                acc_per_scan[batch_iter + b]["n_files"].append(cad_file)
+                                
                                 if gt_sem_cls not in acc_proposal_per_class:
                                     acc_proposal_per_class[gt_sem_cls] = 1
                                 else:
                                     acc_proposal_per_class[gt_sem_cls] += 1
                                 
+                                if pcd is not None:
+                                    acc_per_scan[batch_iter + b]["n_files"].append(cad_file)
+
                                 self.validate_idx_per_scene[b].append(k)
                                 pred_gt.append(k_gt)
                                 break
@@ -307,7 +312,8 @@ class Evaluation:
             self.acc_per_scan[b_id_scan] = {}
             self.acc_per_scan[b_id_scan]["n_total"] = acc_per_scan[b_id_scan]["n_total"].item()
             self.acc_per_scan[b_id_scan]["n_good"] = acc_per_scan[b_id_scan]["n_good"]
-            self.acc_per_scan[b_id_scan]["n_files"] = acc_per_scan[b_id_scan]["n_files"]
+            if pcd is not None:
+                self.acc_per_scan[b_id_scan]["n_files"] = acc_per_scan[b_id_scan]["n_files"]
 
         for sem_cls, n_total in class_total.items():
             self.class_total[sem_cls]               += n_total

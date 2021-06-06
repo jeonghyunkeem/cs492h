@@ -35,7 +35,7 @@ print(device)
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', default='votenet', help='Model file name [default: votenet]')
 parser.add_argument('--dataset', default='scan2cad', help='Dataset name. sunrgbd or scannet. [default: sunrgbd]')
-parser.add_argument('--checkpoint_path', default='./log_rp/checkpoint_rpcad.tar', help='Model checkpoint path [default: None]')
+parser.add_argument('--checkpoint_path', default='./log_vanila/checkpoint_rpcad.tar', help='Model checkpoint path [default: None]')
 parser.add_argument('--dump_dir', default='./result/dump', help='Dump dir to save sample outputs [default: None]')
 parser.add_argument('--num_point', type=int, default=20000, help='Point Number [default: 20000]')
 parser.add_argument('--num_target', type=int, default=256, help='Point Number [default: 256]')
@@ -150,7 +150,8 @@ def evaluate_one_epoch():
                 if key not in stat_dict: stat_dict[key] = 0
                 stat_dict[key] += end_points[key].item()
 
-        evaluation.step(end_points, batch_idx*BATCH_SIZE, pcd=batch_data_label['point_clouds'])
+        # evaluation.step(end_points, batch_idx*BATCH_SIZE, pcd=batch_data_label['point_clouds'])
+        evaluation.step(end_points, batch_idx*BATCH_SIZE)
     
         # Dump evaluation results for visualization
         # if batch_idx == 0:

@@ -256,29 +256,29 @@ class ProposalModule(nn.Module):
         # For CGNL
         feature_dim = features.shape[1]
         batch_size = features.shape[0]
-        features1 = features.contiguous().view(batch_size, feature_dim, 16, 16)
+        # features1 = features.contiguous().view(batch_size, feature_dim, 16, 16)
         
         # # --------- BOX PROPOSAL GENERATION ---------
         # votes relation
-        net1 = self.sa1_1(features1)
-        net1 = self.sa2_1(net1)
-        net1 = net1.contiguous().view(batch_size, feature_dim, self.num_proposal)
+        # features1 = self.sa1_1(features1)
+        # features1 = self.sa2_1(features1)
+        # features1 = features1.contiguous().view(batch_size, feature_dim, self.num_proposal)
         # Box proposal
-        net1 = F.relu(self.bn1(self.conv1(net1))) 
+        net1 = F.relu(self.bn1(self.conv1(features))) 
         net1 = F.relu(self.bn2(self.conv2(net1))) 
         net1 = self.conv3(net1) # (batch_size, objness(2)+center(3)+size(3)+num_class, num_proposal)
         
         # --------- CAD ALGINMENT ESTIMATION ---------
         # Points Cropping by Box
         # features2 = self.BoxCropping(point_cloud, net1)
-        features2 = features.contiguous().view(batch_size, feature_dim, 16, 16)
+        # features2 = features.contiguous().view(batch_size, feature_dim, 16, 16)
 
         # Alignment Relation
-        net2 = self.sa1_2(features2)
-        net2 = self.sa2_2(net2)
-        net2 = net2.contiguous().view(batch_size, feature_dim, self.num_proposal)
+        # features2 = self.sa1_2(features2)
+        # features2 = self.sa2_2(features2)
+        # features2 = features2.contiguous().view(batch_size, feature_dim, self.num_proposal)
         # Alignment Estimation
-        net2 = F.relu(self.cad_bn1(self.cad_conv1(net2)))
+        net2 = F.relu(self.cad_bn1(self.cad_conv1(features)))
         net2 = F.relu(self.cad_bn2(self.cad_conv2(net2)))
         net2 = self.cad_conv3(net2) # (batch_size, symmetry(4)+scale(3)+rotation(6), num_proposal)
 
