@@ -5,4 +5,7 @@
 log2/
 dump/
 outputs/
-
+discard/
+.vscode/
+__pycahe__/
+.empty/
