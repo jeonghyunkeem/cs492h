@@ -14,7 +14,7 @@ import h5py
 from glob import glob
 import numpy as np
 import torch.utils.data as data
-
+from Data.cat_map import ID2NAME, NAME2CLASS
 # import nyuName2ID as nyu
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -28,29 +28,26 @@ DATA_PATH = os.path.join(HOME_DIR, 'Dataset/ShapeNet')
 shapenetpart_seg_num = [4, 2, 2, 4, 4, 3, 3, 2, 4, 2, 6, 2, 3, 3, 3, 3]
 shapenetpart_seg_start_index = [0, 4, 6, 8, 12, 16, 19, 22, 24, 28, 30, 36, 38, 41, 44, 47]
 
-CARED_CATEGORY = {'03001627': 'chair',
-                    '04379243': 'table',
-                    '02933112': 'cabinet',
-                    '02747177': 'trash bin',
-                    '02871439': 'bookshelf',
-                    '03211117': 'display',
-                    '04256520': 'sofa',
-                    '02808440': 'bathtub',
-                    "02818832": 'bed',
-                    "03337140": 'file cabinet',
-                    "02773838": 'bag',
-                    "04004475": 'printer',
-                    "04554684": 'washer',
-                    "03636649": 'lamp',
-                    "03761084": 'microwave',
-                    "04330267": 'stove',
-                    "02801938": 'basket',
-                    "02828884": 'bench',
-                    "03642806": 'laptop',
-                    "03085013": 'keyboard'}
+# ====================================================
+def normalization(pointcloud):
+    """ Normalize Points @J. Kim 
+        @Ref: http://shapenet.cs.stanford.edu/shapenet/obj-zip/ShapeNetCore.v2-old/shapenet/scripts/shapenetcorev2/utils.py
 
-NAME2CLASS = {CARED_CATEGORY[key]:i for i, (key, item) in enumerate(CARED_CATEGORY.items())}
-NAME2CLASS['other'] = 20
+        args:
+            pointcloud: (N, 3)
+       
+        return:
+            pointcloud_normalized: (N, 3)
+    """
+    pmax = pointcloud.max(0)
+    pmin = pointcloud.min(0)
+    centroid = 0.5*(pmax+pmin)
+    diag = pmax - pmin
+    norm = 1 / np.linalg.norm(diag)
+    pointcloud_normalized = (pointcloud - centroid) * norm
+
+    return pointcloud_normalized
+# ====================================================
 
 def translate_pointcloud(pointcloud):
     xyz1 = np.random.uniform(low=2./3., high=3./2., size=[3])
@@ -74,11 +71,12 @@ def rotate_pointcloud(pointcloud):
 
 
 class Dataset(data.Dataset):
-    def __init__(self, dataset_name='shapenetcorev2',
+    def __init__(self, dataset_name='shapenetcorev2', normalize=False,
                 class_choice=None, num_points=2048, split='train', 
                 load_name=True, load_file=True,
                 segmentation=False, 
-                random_rotate=False, random_jitter=False, random_translate=False):
+                random_rotate=False, random_jitter=False, random_translate=False,
+                collect=False):
 
         assert dataset_name.lower() in ['shapenetcorev2', 'shapenetpart', 
             'modelnet10', 'modelnet40', 'shapenetpartpart']
@@ -111,8 +109,8 @@ class Dataset(data.Dataset):
 
         if class_choice:
             class_choice_list = []
-            for i, (key, value) in enumerate(CARED_CATEGORY.items()):
-                class_choice_list.append(value)
+            for i, (key, value) in enumerate(ID2NAME.items()):
+                class_choice_list.append(key)
 
         if self.split in ['train','trainval','all']:   
             self.get_path('train')
@@ -139,7 +137,13 @@ class Dataset(data.Dataset):
             self.seg = np.concatenate(seg, axis=0) 
 
         if self.class_choice != None:
-            indices = np.where(np.isin(self.name, class_choice_list) == True)[0]
+            self.cat_id = []
+            """ Filter class by first 8 character of its name """
+            # ====================================================
+            for i in range(len(self.file)):
+                self.cat_id.append(self.file[i][:8])
+            # ====================================================
+            indices = np.where(np.isin(self.cat_id, class_choice_list) == True)[0]
             self.name = np.array(self.name)
             self.name = self.name[indices].tolist()
             self.data = self.data[indices]
@@ -154,6 +158,25 @@ class Dataset(data.Dataset):
         elif self.segmentation:
             self.seg_num_all = 50
             self.seg_start_index = 0
+        
+        """ # """
+        if collect:
+            print('Collect ShapeNet...')
+            self.file2points = {}
+            for ind in range(len(self.data)):
+                points = self.data[ind].copy()
+                points_normalized = normalization(points)
+                cad_id = self.file[ind]
+                self.file2points[cad_id] = points_normalized
+                self.data[ind] = points_normalized
+            print('ShapeNet Collected!')
+        elif normalize:
+            print('Normalizing ShapeNet...')
+            for ind in range(len(self.data)):
+                points = self.data[ind].copy()
+                self.data[ind] = normalization(points)
+            print('ShapeNet Normalized!')
+ 
 
     def get_path(self, type):
         path_h5py = os.path.join(self.root, '*%s*.h5'%type)
@@ -196,7 +219,7 @@ class Dataset(data.Dataset):
         label = self.label[item]
         if self.load_name:
             name = self.name[item]  # get label name
-            name = NAME2CLASS[name]
+            # sem_cls = NAME2CLASS[name]
         if self.load_file:
             file = self.file[item]  # get file name
 
@@ -215,9 +238,14 @@ class Dataset(data.Dataset):
         if self.segmentation:
             seg = self.seg[item]
             seg = torch.from_numpy(seg)
-            return point_set, label, seg, name, file
+            # return point_set, label, seg, name, file
+            return point_set, label, file[:8], file
         else:
-            return point_set, label, name, file
+            # return point_set, label, name, file
+            return point_set, label, file[:8], file
+
+    def file_search(self, fname):
+        return self.file2points[fname]
 
     def __len__(self):
         return self.data.shape[0]
@@ -232,16 +260,27 @@ if __name__ == '__main__':
 
     # choose split type from 'train', 'test', 'all', 'trainval' and 'val'
     # only shapenetcorev2 and shapenetpart dataset support 'trainval' and 'val'
-    split = 'train' # 'test', 'all', 'val'
+    split = 'all' # 'test', 'all', 'val'
     data = Dataset(dataset_name='shapenetcorev2', num_points=2048, split=split, class_choice=True)
     print("datasize:", data.__len__())
     
     n = len(data)
+    all_category = []
+    all_names = []
     for i in range(n):
-        ps, lb, cat, fn = data[i]
-        if cat not in NAME2CLASS:
-            print(cat, fn)
-            break
+        print(i)
+        ps, lb, n, fn = data[i]
+        all_category.append(n)
+        # all_names.append(n)
+        # if n not in NAME2CLASS:
+        #     print(n, fn)
+        #     break
+
+    all_category = np.array(all_category)
+    # all_names = np.array(all_names)
+    print(np.unique(all_category))
+    print(len(np.unique(all_category)))
+    # print(np.unique(all_names))
 
     # item = 0
     # ps, lb, n, f = data[item]

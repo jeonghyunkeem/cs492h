@@ -1,4 +1,5 @@
 import os, sys, time
+# from scan2cad.s2c_eval import ShapenetNameToClass
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -10,6 +11,7 @@ from tqdm import tqdm
 # from chamfer_distance.chamfer_distance import ChamferDistance 
 from autoencoder import PointNetAE
 from Data.dataset import Dataset
+from Data.cat_map import ID2NAME, NAME2CLASS
 
 import pickle
 from sklearn.neighbors import NearestNeighbors
@@ -17,12 +19,13 @@ from sklearn.neighbors import KDTree
 from pdb import set_trace
 from sklearn.manifold import TSNE
 from matplotlib import pyplot as plt
+import matplotlib.cm as cm
+import pandas as pd
+import seaborn as sns
 
 BASE_DIR = os.path.dirname(__file__)
 DUMP_DIR = os.path.join(BASE_DIR, 'dump')
 sys.path.append(os.path.join(BASE_DIR, 'chamfer_distance'))
-
-
 
 # Hyperparam
 BATCH_SIZE = 32
@@ -37,18 +40,11 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print(device)
 
 # Dataset/loader
-TRAIN_DATASET = Dataset(dataset_name=data, num_points=n_points, split='train', class_choice=True)
-TEST_DATASET = Dataset(dataset_name=data, num_points=n_points, split='test', class_choice=True)
-EVAL_DATASET = Dataset(dataset_name=data, num_points=n_points, split='val', class_choice=True)
-
-TRAIN_DATALOADER = torch.utils.data.DataLoader(TRAIN_DATASET, 
-                                                   batch_size=BATCH_SIZE,
-                                                   shuffle=False,
-                                                   num_workers=4)
-TEST_DATALOADER = torch.utils.data.DataLoader(TEST_DATASET,
-                                                  batch_size=BATCH_SIZE,
-                                                  shuffle=False,
-                                                  num_workers=4)
+DATASET = Dataset(dataset_name=data, num_points=n_points, split='all', class_choice=True)
+DATALOADER = torch.utils.data.DataLoader(DATASET, 
+                                        batch_size=BATCH_SIZE,
+                                        shuffle=False,
+                                        num_workers=4)
 
 # Set Network
 n_dims = 3
@@ -63,7 +59,8 @@ net.eval()
 # criterion = chamfer_distance
 
 def collect_embedding():    
-    n = len(TRAIN_DATASET)
+    n = len(DATASET)
+    print(n)
     pbar = tqdm(total=n, leave=False)
     
     # Evaluate
@@ -72,7 +69,7 @@ def collect_embedding():
 
     # Set embeddings
     check = True
-    for i, data in enumerate(TRAIN_DATALOADER):
+    for i, data in enumerate(DATALOADER):
         # Parse data
         points, label, category, filename = data
         points = points.cuda()
@@ -83,7 +80,7 @@ def collect_embedding():
 
             embedding   = np.array(embedding.cpu())
             label       = np.array(label.cpu())
-            category    = np.array(category.cpu()).reshape(-1, 1)
+            category    = np.array(category).reshape(-1, 1)
             filename    = np.array(list(filename)).reshape(-1, 1)
 
             # if check: return
@@ -122,21 +119,6 @@ def collect_embedding():
         pickle_out.close()
 
 
-def tsne_visualization():
-    all_embeddings  = np.load(DUMP_DIR + '/all_embeddings.npy')
-    all_labels      = np.load(DUMP_DIR + '/all_labels.npy')
-
-    time_start = time.time()
-    tsne = TSNE(n_components=2, random_state=0)
-    embeddings_2d = tsne.fit_transform(all_embeddings)
-    print('t-SNE done! Time elapsed: {} seconds'.format(time.time()-time_start))
-
-    plt.scatter(embeddings_2d[:, 0], embeddings_2d[:, 1], c=all_labels, label=all_labels, s=0.2, alpha=0.5)
-
-    plt.legend()
-    plt.savefig(os.path.join(DUMP_DIR, 'tsne.png'))
-
-
 def retrieval(q, test=False):
     # Set data
     all_embeddings  = np.load(DUMP_DIR + '/all_embeddings.npy')
@@ -151,7 +133,7 @@ def retrieval(q, test=False):
             pred = {}
 
             # Target data
-            points, label, _, filename = TRAIN_DATASET[q]
+            points, label, _, filename = DATASET[q]
             points = points.cuda().unsqueeze(0)
                 
             embedding = net(points, r=True).detach().cpu()
@@ -163,19 +145,22 @@ def retrieval(q, test=False):
             pred['filename'] = all_filenames[idx]
 
         else:
-            n = len(TRAIN_DATASET)
+            n = len(DATASET)
             for i in range(n):
+                if i % 10000 == 0:
+                    print(i)
                 # Target data
-                points, label, category, filename = TRAIN_DATASET[i]
+                points, label, category, filename = DATASET[i]
                 points = points.cuda().unsqueeze(0)
                 
                 embedding = net(points, r=True).detach().cpu()
+                gt_embedding = np.array([all_embeddings[i]])
 
                 # Search nearest neighbor in embedding space
-                label = label.cpu().item()
-                filename = filename
+                # label = label.cpu().item()
+                # filename = filename
                 dist, q_pred_idx = database_kdtree.query(embedding, k=1)
-                dist, e_pred_idx = database_kdtree.query(np.array([all_embeddings[i]]), k=1)
+                dist, e_pred_idx = database_kdtree.query(gt_embedding, k=1)
 
                 # Output
                 query_filename  = all_filenames[q_pred_idx][0][0][0]
@@ -197,8 +182,46 @@ def retrieval(q, test=False):
         
     return pred
 
+def tsne_visualization(ppl=30):
+    all_embeddings  = np.load(DUMP_DIR + '/all_embeddings.npy')
+    all_category    = np.load(DUMP_DIR + '/all_category.npy')
+    all_category = all_category.reshape(-1).tolist()
+
+    time_start = time.time()
+    print('Start t-SNE...')
+    tsne = TSNE(n_components=2, perplexity=ppl, random_state=0)
+    embeddings_2d = tsne.fit_transform(all_embeddings)
+    print('t-SNE done! Time elapsed: {} seconds'.format(time.time()-time_start))
+
+    # Plot
+    plt.figure(figsize=(16,16))
+    df = pd.DataFrame()
+    df["x"] = embeddings_2d[:,0]
+    df["y"] = embeddings_2d[:,1]
+
+    # all_category = all_category.reshape(-1).tolist()
+    color_map = cm.rainbow(np.linspace(0, 1, 35))
+    colors = []
+    for i, cat in enumerate(all_category):
+        all_category[i] = ID2NAME[cat]
+        color = color_map[NAME2CLASS[ID2NAME[cat]]]
+        colors.append(color)
+    labels = np.unique(np.array(all_category))
+    # plt.scatter(x=df.x, y=df.y, c=colors, label=labels, s=0.5, alpha=0.5, data=df)
+    sns.scatterplot(x=df.x, y=df.y, hue=all_category, 
+                    palette=sns.color_palette('hls', 35), 
+                    data=df,
+                    legend='full', 
+                    alpha=0.5)
+
+    # plt.legend()
+    file_name = 'tsne_512_ppl' + str(ppl) + '.png'
+    plt.savefig(os.path.join(DUMP_DIR, file_name))
+
+def establish(test=True):
+    collect_embedding()
+    output = retrieval(0, test=test)
 
 if __name__ == "__main__":
-    collect_embedding()
-    # tsne_visualization()
-    output = retrieval(0, test=True)
+    # establish(test=True)
+    tsne_visualization(ppl=50)

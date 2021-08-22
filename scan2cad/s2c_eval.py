@@ -8,6 +8,14 @@ import pickle
 ShapenetNameToClass = {'chair': 0, 'table': 1, 'cabinet': 2, 'trash bin': 3, 'bookshelf': 4,'display': 5,'sofa': 6, 'bathtub': 7, 'other': 8}
 ShapenetClassToName = {ShapenetNameToClass[k]: k for k in ShapenetNameToClass}
 
+def cls_map(data_cls):
+    if data_cls == 'monitor':
+        mapped_cls = 'display'
+    if data_cls == '':
+        mapped_clss = None
+        
+    return mapped_cls
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(BASE_DIR)
 RET_DIR = os.path.join(ROOT_DIR, 'models/retrieval/dump')
@@ -171,7 +179,6 @@ class Evaluation:
 
         # Change category
         for b in range(B):
-            
             for k in range(K):
                 pred_class[b,k,:] = get_top_8_category(pred_class[b,k,:])
             for k2 in range(K2):
@@ -206,6 +213,7 @@ class Evaluation:
                 database_kdtree = pickle.load(pickle_file)
                 for k in np.where(pred_mask[b, :] == 1)[0]:  # loop in proposals           
                     # Class prediction
+                    # ========= RETRIEVAL =========
                     if pcd is not None:
                         box3d = s2c_utils.get_3d_box(pred_size[b,k,:3], 0, pred_center[b,k,:3])
                         box3d = s2c_utils.flip_axis_to_depth(box3d)
@@ -220,16 +228,20 @@ class Evaluation:
                         # Output
                         pred_sem_clses = self.sem_clses[pred_idx].squeeze(0)
                         cad_files      = self.filenames[pred_idx].squeeze(0)
+                    # ==============================
                     else:
                         pred_sem_cls = pred_class[b, k, :][0]
+                    # Evaluation    
                     for k_gt in range(K2):
                         # Pass predicted ground-truth
                         if k_gt in pred_gt: continue
 
                         # ------ Compare Prediction with GT ------
                         gt_sem_cls = gt_class[b,k_gt,:].item()
+                        
+                        # ========= RETRIEVAL =========
                         if pcd is not None:
-                            gt_sem_cls += 1
+                            # gt_sem_cls += 1
                             pred_sem_cls = -1
                             # Only compare with same class
                             for i in range(5):
@@ -238,6 +250,7 @@ class Evaluation:
                                 if pred_sem_clses[i] == gt_sem_cls:
                                     pred_sem_cls = pred_sem_clses[i, 0:1]
                                     cad_file = cad_files[i, 0:1]
+                        # ==============================
 
                         is_same_class = pred_sem_cls == gt_sem_cls
                         if is_same_class:

@@ -7,6 +7,8 @@ from torch.utils.data import Dataset
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(BASE_DIR)
+DATA_DIR = os.path.dirname(ROOT_DIR)
+DATA_DIR = os.path.join(DATA_DIR, 'Dataset')
 sys.path.append(BASE_DIR)
 
 # import scan2cad_utils
@@ -17,7 +19,8 @@ DC = Scan2CADDatasetConfig()
 MAX_NUM_POINT = 40000
 MAX_NUM_OBJ = 64
 
-NOT_CARED_ID = np.array([0])
+# NOT_CARED_ID = np.array([0])
+NOT_CARED_ID = []
 
 SYM2CLASS = {"__SYM_NONE": 0, "__SYM_ROTATE_UP_2": 1, "__SYM_ROTATE_UP_4": 2, "__SYM_ROTATE_UP_INF": 3}
 
@@ -57,7 +60,7 @@ def make_M_from_tqs(t, q, s):
 
 class Scan2CADDataset(Dataset):
     def __init__(self, split_set='train', num_points=40000, augment=False):
-        self.data_path = os.path.join(BASE_DIR, 'scan2cad_data')
+        self.data_path = os.path.join(DATA_DIR, 'Scan2CAD/export')
         filename_json = BASE_DIR + "/full_annotations.json"
         assert filename_json
 
@@ -203,6 +206,7 @@ class Scan2CADDataset(Dataset):
                 # --- Rotation-6D Representation ---
                 target_obj_6d_rotation[model, :] = from_q_to_6d(target_rotation[model, :])
         # =============================================================================
+
         # ------ GENERATE VOTES ------
         # Generate Votes 
         point_votes             = np.zeros([self.num_points, 3])
@@ -250,6 +254,7 @@ class Scan2CADDataset(Dataset):
             # Lift point center to CAD center 
             bbox_length1 = abs(cad_x.max(0) - cad_center)
             bbox_length2 = abs(cad_x.min(0) - cad_center)
+
             if np.sum(bbox_length1) > np.sum(bbox_length2):
                 bbox_length = bbox_length1*2
             else:

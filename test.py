@@ -33,9 +33,10 @@ torch.cuda.set_device(device) # change allocation of current GPU
 print(device)
 
 parser = argparse.ArgumentParser()
+parser.add_argument('--ret', default=False, help='Retrieve CAD model using cropped points')
 parser.add_argument('--model', default='votenet', help='Model file name [default: votenet]')
 parser.add_argument('--dataset', default='scan2cad', help='Dataset name. sunrgbd or scannet. [default: sunrgbd]')
-parser.add_argument('--checkpoint_path', default='./log_vanila/checkpoint_rpcad.tar', help='Model checkpoint path [default: None]')
+parser.add_argument('--checkpoint_path', default='./logs/log_rp/checkpoint_rpcad.tar', help='Model checkpoint path [default: None]')
 parser.add_argument('--dump_dir', default='./result/dump', help='Dump dir to save sample outputs [default: None]')
 parser.add_argument('--num_point', type=int, default=20000, help='Point Number [default: 20000]')
 parser.add_argument('--num_target', type=int, default=256, help='Point Number [default: 256]')
@@ -64,9 +65,10 @@ BATCH_SIZE = FLAGS.batch_size
 NUM_POINT = FLAGS.num_point
 DUMP_DIR = FLAGS.dump_dir
 CHECKPOINT_PATH = FLAGS.checkpoint_path
-assert(CHECKPOINT_PATH is not None)
+assert(CHECKPOINT_PATH is not None and os.path.isfile(CHECKPOINT_PATH))
 FLAGS.DUMP_DIR = DUMP_DIR
 AP_IOU_THRESHOLDS = [float(x) for x in FLAGS.ap_iou_thresholds.split(',')]
+RET = FLAGS.ret
 
 # Prepare DUMP_DIR
 if not os.path.exists(DUMP_DIR): os.mkdir(DUMP_DIR)
@@ -113,6 +115,9 @@ if CHECKPOINT_PATH is not None and os.path.isfile(CHECKPOINT_PATH):
     epoch = checkpoint['epoch']
     log_string("Loaded checkpoint %s (epoch: %d)"%(CHECKPOINT_PATH, epoch))
 
+if RET:
+    log_string(":::::: Retrieval ::::::")
+
 CONFIG_DICT = {'remove_empty_box':False, 
                 'use_3d_nms':True,
                 'nms_iou':0.25, 
@@ -150,8 +155,10 @@ def evaluate_one_epoch():
                 if key not in stat_dict: stat_dict[key] = 0
                 stat_dict[key] += end_points[key].item()
 
-        # evaluation.step(end_points, batch_idx*BATCH_SIZE, pcd=batch_data_label['point_clouds'])
-        evaluation.step(end_points, batch_idx*BATCH_SIZE)
+        if RET:
+            evaluation.step(end_points, batch_idx*BATCH_SIZE, pcd=batch_data_label['point_clouds'])
+        else:
+            evaluation.step(end_points, batch_idx*BATCH_SIZE)
     
         # Dump evaluation results for visualization
         # if batch_idx == 0:

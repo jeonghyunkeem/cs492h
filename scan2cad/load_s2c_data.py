@@ -10,7 +10,7 @@ ROOT_DIR = os.path.dirname(BASE_DIR)
 sys.path.append(BASE_DIR)
 
 # import scan2cad_utils
-from scan2cad.s2c_config import Scan2CADDatasetConfig
+from s2c_config import Scan2CADDatasetConfig
 import s2c_utils
 
 DC = Scan2CADDatasetConfig()
@@ -39,14 +39,12 @@ def make_M_from_tqs(t, q, s):
     M = T.dot(R).dot(S)
     return M 
 
-class Scan2CADDataset(Dataset):
+class Decoder(Dataset):
     def __init__(self):
-        self.data_path = os.path.join(BASE_DIR, 'scannet_data')
         filename_json = BASE_DIR + "/full_annotations.json"
         assert filename_json
 
         self.dataset = {}
-        self.test: int = None
         self.scan_names = []
         with open(filename_json, 'r') as f:
             data = json.load(f)
@@ -61,6 +59,8 @@ class Scan2CADDataset(Dataset):
                 d[i]['trs'] = r["trs"]
 
                 self.scan_names.append(i_scan)
+
+        self.dataset = d
 
     def __len__(self):
         return len(self.dataset)
